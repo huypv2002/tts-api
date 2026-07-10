@@ -134,8 +134,9 @@ label {
   box-shadow: var(--shadow);
 }
 
-/* Prefer class toggle; avoid fighting inline styles from older cached JS */
+/* Do not use !important — it broke older JS that only set style.display */
 .hidden { display: none; }
+#login-view.hidden, #app-view.hidden { display: none; }
 .muted { color: var(--muted); font-size: 0.92rem; }
 .mono { font-family: var(--mono); font-size: 0.84rem; }
 .error { color: var(--danger); font-size: 0.9rem; margin-top: 0.75rem; min-height: 1.2em; }

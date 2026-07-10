@@ -91,7 +91,14 @@ async def admin_ui():
     index = STATIC / "admin" / "index.html"
     if not index.exists():
         return {"error": "admin UI missing"}
-    return FileResponse(index)
+    # Prevent Cloudflare/browser serving stale blank HTML
+    return FileResponse(
+        index,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 def run():

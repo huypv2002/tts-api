@@ -8,6 +8,7 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 
 function toast(msg) {
   const el = $("#toast");
+  if (!el) return;
   el.textContent = msg;
   el.classList.add("show");
   setTimeout(() => el.classList.remove("show"), 3200);
@@ -19,7 +20,11 @@ async function api(path, opts = {}) {
   const res = await fetch(`/admin/api${path}`, { ...opts, headers });
   const text = await res.text();
   let data;
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; }
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { detail: text || res.statusText };
+  }
   if (!res.ok) {
     const msg = data.detail || data.error || res.statusText;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
@@ -28,34 +33,45 @@ async function api(path, opts = {}) {
 }
 
 function showLogin() {
-  const login = $("#login-view");
-  const app = $("#app-view");
-  if (login) {
-    login.classList.remove("hidden");
-    login.style.display = "";
+  if (typeof window.__ttsShowLogin === "function") window.__ttsShowLogin();
+  else {
+    const login = $("#login-view");
+    const app = $("#app-view");
+    if (login) {
+      login.hidden = false;
+      login.style.display = "grid";
+      login.classList.remove("hidden");
+    }
+    if (app) {
+      app.hidden = true;
+      app.style.display = "none";
+    }
   }
-  if (app) {
-    app.classList.add("hidden");
-    app.style.display = "none";
-  }
+  const hint = $("#boot-hint");
+  if (hint) hint.textContent = "Enter admin password to continue";
 }
 
 function showApp() {
-  const login = $("#login-view");
-  const app = $("#app-view");
-  if (login) {
-    login.classList.add("hidden");
-    login.style.display = "none";
-  }
-  if (app) {
-    app.classList.remove("hidden");
-    app.style.display = "";
+  if (typeof window.__ttsShowApp === "function") window.__ttsShowApp();
+  else {
+    const login = $("#login-view");
+    const app = $("#app-view");
+    if (login) {
+      login.hidden = true;
+      login.style.display = "none";
+    }
+    if (app) {
+      app.hidden = false;
+      app.style.display = "block";
+      app.classList.remove("hidden");
+    }
   }
 }
 
 async function login(e) {
   e.preventDefault();
-  $("#login-error").textContent = "";
+  const errEl = $("#login-error");
+  if (errEl) errEl.textContent = "";
   try {
     const password = $("#password").value;
     const data = await api("/login", { method: "POST", body: JSON.stringify({ password }) });
@@ -64,12 +80,14 @@ async function login(e) {
     showApp();
     await navigate("overview");
   } catch (err) {
-    $("#login-error").textContent = err.message;
+    if (errEl) errEl.textContent = err.message;
   }
 }
 
 async function logout() {
-  try { await api("/logout", { method: "POST" }); } catch (_) {}
+  try {
+    await api("/logout", { method: "POST" });
+  } catch (_) {}
   state.token = "";
   localStorage.removeItem("tts_admin_token");
   showLogin();
@@ -87,14 +105,17 @@ function setNav(page) {
     usage: ["Usage", "Daily character & job consumption"],
   };
   const t = titles[page] || [page, ""];
-  $("#page-title").textContent = t[0];
+  const title = $("#page-title");
   const sub = $("#page-sub");
+  if (title) title.textContent = t[0];
   if (sub) sub.textContent = t[1];
 }
 
 async function navigate(page) {
+  if (!page) return;
   setNav(page);
   const root = $("#content");
+  if (!root) return;
   root.innerHTML = `<p class="muted">Loading…</p>`;
   try {
     if (page === "overview") await renderOverview(root);
@@ -113,9 +134,9 @@ async function navigate(page) {
 }
 
 function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[c]);
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
 }
 
 function badge(status) {
@@ -141,7 +162,9 @@ async function renderOverview(root) {
       <table>
         <thead><tr><th>ID</th><th>Label</th><th>State</th><th>Exit IP</th><th>In flight</th><th>OK on IP</th><th>Total OK</th></tr></thead>
         <tbody>
-          ${(d.proxies||[]).map(p => `
+          ${(d.proxies || [])
+            .map(
+              (p) => `
             <tr>
               <td class="mono">${esc(p.id)}</td>
               <td>${esc(p.label)}</td>
@@ -150,7 +173,9 @@ async function renderOverview(root) {
               <td>${p.in_flight}</td>
               <td>${p.ok_on_ip}</td>
               <td>${p.total_ok}</td>
-            </tr>`).join("") || `<tr><td colspan="7" class="muted">No proxies configured</td></tr>`}
+            </tr>`
+            )
+            .join("") || `<tr><td colspan="7" class="muted">No proxies configured</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -159,15 +184,19 @@ async function renderOverview(root) {
       <table>
         <thead><tr><th>ID</th><th>Status</th><th>Chars</th><th>Proxy</th><th>ms</th><th>Preview</th></tr></thead>
         <tbody>
-          ${(d.recent_jobs||[]).map(j => `
+          ${(d.recent_jobs || [])
+            .map(
+              (j) => `
             <tr>
-              <td class="mono">${esc(j.id).slice(0,16)}…</td>
+              <td class="mono">${esc(j.id).slice(0, 16)}…</td>
               <td>${badge(j.status)}</td>
               <td>${j.text_chars}</td>
               <td class="mono">${esc(j.proxy_id || "—")}</td>
               <td>${j.duration_ms ?? "—"}</td>
               <td>${esc(j.text_preview || "")}</td>
-            </tr>`).join("") || `<tr><td colspan="6" class="muted">No jobs yet</td></tr>`}
+            </tr>`
+            )
+            .join("") || `<tr><td colspan="6" class="muted">No jobs yet</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -188,7 +217,7 @@ async function renderKeys(root) {
         <div class="field"><label>Note</label><input id="k-note" placeholder="optional" /></div>
       </div>
       <div class="form-actions">
-        <button class="primary" id="k-create">Create key</button>
+        <button class="primary" id="k-create" type="button">Create key</button>
       </div>
       <div id="k-new" class="hidden" style="margin-top:1rem"></div>
     </div>
@@ -202,7 +231,9 @@ async function renderKeys(root) {
           </tr>
         </thead>
         <tbody>
-          ${data.keys.map(k => `
+          ${(data.keys || [])
+            .map(
+              (k) => `
             <tr data-id="${k.id}">
               <td>${esc(k.name)}</td>
               <td class="mono">${esc(k.key_prefix)}</td>
@@ -213,11 +244,13 @@ async function renderKeys(root) {
               <td>${k.jobs_used_day}/${k.quota_jobs_day}</td>
               <td>${k.total_jobs} jobs / ${k.total_chars}c</td>
               <td class="row" style="margin:0">
-                <button data-act="save">Save</button>
-                <button data-act="toggle">${k.enabled ? "Disable" : "Enable"}</button>
-                <button class="danger" data-act="del">Delete</button>
+                <button type="button" data-act="save">Save</button>
+                <button type="button" data-act="toggle">${k.enabled ? "Disable" : "Enable"}</button>
+                <button type="button" class="danger" data-act="del">Delete</button>
               </td>
-            </tr>`).join("")}
+            </tr>`
+            )
+            .join("")}
         </tbody>
       </table>
     </div>
@@ -228,19 +261,28 @@ async function renderKeys(root) {
         name: $("#k-name").value || "customer",
         note: $("#k-note").value || "",
       };
-      const max = $("#k-max").value; if (max) body.max_chars = +max;
-      const qc = $("#k-qc").value; if (qc) body.quota_chars_day = +qc;
-      const qj = $("#k-qj").value; if (qj) body.quota_jobs_day = +qj;
-      const mc = $("#k-mc").value; if (mc) body.max_concurrent = +mc;
+      const max = $("#k-max").value;
+      if (max) body.max_chars = +max;
+      const qc = $("#k-qc").value;
+      if (qc) body.quota_chars_day = +qc;
+      const qj = $("#k-qj").value;
+      if (qj) body.quota_jobs_day = +qj;
+      const mc = $("#k-mc").value;
+      if (mc) body.max_concurrent = +mc;
       const res = await api("/keys", { method: "POST", body: JSON.stringify(body) });
       const box = $("#k-new");
       box.classList.remove("hidden");
+      box.style.display = "block";
       box.innerHTML = `<p class="muted">${esc(res.note)}</p><pre class="keybox">${esc(res.key)}</pre>
-        <button id="k-copy">Copy key</button>`;
-      $("#k-copy").onclick = () => { navigator.clipboard.writeText(res.key); toast("Copied"); };
+        <button type="button" id="k-copy">Copy key</button>`;
+      $("#k-copy").onclick = () => {
+        navigator.clipboard.writeText(res.key);
+        toast("Copied");
+      };
       toast("API key created");
-      setTimeout(() => navigate("keys"), 500);
-    } catch (e) { toast(e.message); }
+    } catch (e) {
+      toast(e.message);
+    }
   };
   root.querySelectorAll("tr[data-id]").forEach((tr) => {
     const id = tr.dataset.id;
@@ -252,21 +294,27 @@ async function renderKeys(root) {
       try {
         await api(`/keys/${id}`, { method: "PATCH", body: JSON.stringify(body) });
         toast("Saved");
-      } catch (e) { toast(e.message); }
+      } catch (e) {
+        toast(e.message);
+      }
     };
     tr.querySelector('[data-act="toggle"]').onclick = async () => {
       const en = tr.querySelector('[data-act="toggle"]').textContent === "Enable";
       try {
         await api(`/keys/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: en }) });
         navigate("keys");
-      } catch (e) { toast(e.message); }
+      } catch (e) {
+        toast(e.message);
+      }
     };
     tr.querySelector('[data-act="del"]').onclick = async () => {
       if (!confirm("Delete this key?")) return;
       try {
         await api(`/keys/${id}`, { method: "DELETE" });
         navigate("keys");
-      } catch (e) { toast(e.message); }
+      } catch (e) {
+        toast(e.message);
+      }
     };
   });
 }
@@ -291,27 +339,31 @@ async function renderProxies(root) {
         <div class="field"><label>Username</label><input id="p-user" /></div>
         <div class="field"><label>Password</label><input id="p-pass" type="password" /></div>
       </div>
-      <button class="primary" id="p-save">Save proxy</button>
+      <button class="primary" id="p-save" type="button">Save proxy</button>
     </div>
     <div class="panel">
       <h3>Pool (${data.stats.ready}/${data.stats.total} ready)</h3>
       <table>
         <thead><tr><th>ID</th><th>Label</th><th>State</th><th>Exit</th><th>In flight</th><th>OK/IP</th><th>Error</th><th></th></tr></thead>
         <tbody>
-          ${data.proxies.map(p => `
+          ${(data.proxies || [])
+            .map(
+              (p) => `
             <tr>
               <td class="mono">${esc(p.id)}</td>
               <td>${esc(p.label)}</td>
               <td>${badge(p.state)}</td>
-              <td class="mono">${esc(p.exit_ip||"—")}</td>
+              <td class="mono">${esc(p.exit_ip || "—")}</td>
               <td>${p.in_flight}</td>
               <td>${p.ok_on_ip}</td>
-              <td class="muted" style="max-width:180px">${esc(p.last_error||"")}</td>
+              <td class="muted" style="max-width:180px">${esc(p.last_error || "")}</td>
               <td class="row" style="margin:0">
-                <button data-rot="${esc(p.id)}">Rotate IP</button>
-                <button class="danger" data-del="${esc(p.id)}">Delete</button>
+                <button type="button" data-rot="${esc(p.id)}">Rotate IP</button>
+                <button type="button" class="danger" data-del="${esc(p.id)}">Delete</button>
               </td>
-            </tr>`).join("") || `<tr><td colspan="8" class="muted">Empty — add proxies above</td></tr>`}
+            </tr>`
+            )
+            .join("") || `<tr><td colspan="8" class="muted">Empty — add proxies above</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -334,7 +386,9 @@ async function renderProxies(root) {
       });
       toast("Proxy saved");
       navigate("proxies");
-    } catch (e) { toast(e.message); }
+    } catch (e) {
+      toast(e.message);
+    }
   };
   root.querySelectorAll("[data-rot]").forEach((b) => {
     b.onclick = async () => {
@@ -343,7 +397,10 @@ async function renderProxies(root) {
         await api(`/proxies/${b.dataset.rot}/rotate`, { method: "POST" });
         toast("Rotated");
         navigate("proxies");
-      } catch (e) { toast(e.message); b.disabled = false; }
+      } catch (e) {
+        toast(e.message);
+        b.disabled = false;
+      }
     };
   });
   root.querySelectorAll("[data-del]").forEach((b) => {
@@ -352,7 +409,9 @@ async function renderProxies(root) {
       try {
         await api(`/proxies/${b.dataset.del}`, { method: "DELETE" });
         navigate("proxies");
-      } catch (e) { toast(e.message); }
+      } catch (e) {
+        toast(e.message);
+      }
     };
   });
 }
@@ -379,15 +438,19 @@ async function renderSettings(root) {
     <div class="panel">
       <h3>Global settings</h3>
       <p class="muted" style="margin:-0.4rem 0 1rem">
-        <strong>Default max chars</strong> chỉ áp dụng cho API key <em>mới</em>.
-        Key cũ giữ max_chars riêng — tick ô bên dưới để ghi đè tất cả keys.
+        <strong>Default max chars</strong> only applies to <em>new</em> API keys.
+        Tick the box below to overwrite all existing keys.
       </p>
       <div class="grid-2">
-        ${allFields.map(([k, label, type]) => `
+        ${allFields
+          .map(
+            ([k, label, type]) => `
           <div class="field">
             <label>${esc(label)}</label>
             <input id="s-${k}" type="${type}" value="${esc(s[k] ?? "")}" ${type === "number" ? 'min="1" step="1"' : ""} />
-          </div>`).join("")}
+          </div>`
+          )
+          .join("")}
         <div class="field">
           <label>New admin password (optional)</label>
           <input id="s-admin_password" type="password" placeholder="leave blank to keep" autocomplete="new-password" />
@@ -445,7 +508,6 @@ GET /v1/health</pre>
       const msg = `Saved. default_max_chars=${maxc}` + (ku ? ` · updated ${ku} API key(s)` : "");
       status.textContent = msg;
       toast(msg);
-      // re-render so inputs show server values
       await navigate("settings");
     } catch (e) {
       status.textContent = e.message;
@@ -462,17 +524,21 @@ async function renderJobs(root) {
       <table>
         <thead><tr><th>ID</th><th>Status</th><th>Chars</th><th>Proxy</th><th>Exit</th><th>ms</th><th>Error</th><th>Preview</th></tr></thead>
         <tbody>
-          ${data.jobs.map(j => `
+          ${(data.jobs || [])
+            .map(
+              (j) => `
             <tr>
-              <td class="mono">${esc(j.id).slice(0,18)}</td>
+              <td class="mono">${esc(j.id).slice(0, 18)}</td>
               <td>${badge(j.status)}</td>
               <td>${j.text_chars}</td>
-              <td>${esc(j.proxy_id||"—")}</td>
-              <td class="mono">${esc(j.exit_ip||"—")}</td>
+              <td>${esc(j.proxy_id || "—")}</td>
+              <td class="mono">${esc(j.exit_ip || "—")}</td>
               <td>${j.duration_ms ?? "—"}</td>
-              <td class="muted" style="max-width:160px">${esc((j.error||"").slice(0,80))}</td>
-              <td>${esc(j.text_preview||"")}</td>
-            </tr>`).join("")}
+              <td class="muted" style="max-width:160px">${esc((j.error || "").slice(0, 80))}</td>
+              <td>${esc(j.text_preview || "")}</td>
+            </tr>`
+            )
+            .join("")}
         </tbody>
       </table>
     </div>
@@ -487,9 +553,13 @@ async function renderUsage(root) {
       <table>
         <thead><tr><th>Day</th><th>Chars</th><th>OK jobs</th><th>Events</th></tr></thead>
         <tbody>
-          ${(u.by_day||[]).map(d => `
+          ${(u.by_day || [])
+            .map(
+              (d) => `
             <tr><td>${esc(d.day)}</td><td>${d.chars}</td><td>${d.ok_jobs}</td><td>${d.events}</td></tr>
-          `).join("") || `<tr><td colspan="4" class="muted">No usage yet</td></tr>`}
+          `
+            )
+            .join("") || `<tr><td colspan="4" class="muted">No usage yet</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -501,22 +571,30 @@ async function renderUsage(root) {
 }
 
 // boot
-$("#login-form").addEventListener("submit", login);
-$("#btn-logout").addEventListener("click", logout);
-$$(".nav-btn[data-page]").forEach((b) => b.addEventListener("click", () => navigate(b.dataset.page)));
-const btnRefresh = $("#btn-refresh");
-if (btnRefresh) btnRefresh.addEventListener("click", () => navigate(state.page || "overview"));
+function wireUi() {
+  const form = $("#login-form");
+  if (form) form.addEventListener("submit", login);
+  const lo = $("#btn-logout");
+  if (lo) lo.addEventListener("click", logout);
+  $$(".nav-btn[data-page]").forEach((b) =>
+    b.addEventListener("click", () => navigate(b.dataset.page))
+  );
+  const btnRefresh = $("#btn-refresh");
+  if (btnRefresh) btnRefresh.addEventListener("click", () => navigate(state.page || "overview"));
+}
+
+wireUi();
 
 (async () => {
-  if (!state.token) {
-    showLogin();
-    return;
-  }
+  showLogin();
+  if (!state.token) return;
   try {
     await api("/dashboard");
     showApp();
     await navigate("overview");
   } catch {
+    state.token = "";
+    localStorage.removeItem("tts_admin_token");
     showLogin();
   }
 })();
