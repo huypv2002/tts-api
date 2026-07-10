@@ -160,21 +160,29 @@ class WorkerManager:
                 return
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
-                print(f"[W{wid}] FAIL {jid[:8]}: {err[:180]}", flush=True)
+                err_short = " ".join(err.replace("\n", " ").split())[:300]
+                print(f"[W{wid}] FAIL {jid[:8]}: {err_short[:180]}", flush=True)
+                # Known Windows fix: pin playwright<1.61 (isMobile viewport crash)
+                if "isMobile" in err or "setDefaultViewport" in err:
+                    err_short = (
+                        "Camoufox/Playwright viewport bug (isMobile). "
+                        "On Windows run: fix_playwright.bat then restart start_all.bat "
+                        f"| {err_short[:160]}"
+                    )
                 if _is_block(e):
-                    await pool.release_block_and_rotate(slot, err)
-                    await self.db.update_job(jid, error=err[:500], proxy_id=slot.id)
+                    await pool.release_block_and_rotate(slot, err_short)
+                    await self.db.update_job(jid, error=err_short, proxy_id=slot.id)
                     await asyncio.sleep(0.5)
                     continue  # retry job on new IP / other slot
                 if _is_transient(e):
-                    await pool.release_transient(slot, err)
+                    await pool.release_transient(slot, err_short)
                     await asyncio.sleep(min(1.0 * attempt, 4.0))
                     continue
-                await pool.release_transient(slot, err)
+                await pool.release_transient(slot, err_short)
                 await self.db.update_job(
                     jid,
                     status="failed",
-                    error=err[:500],
+                    error=err_short,
                     proxy_id=slot.id,
                     finished_at=_iso(),
                     duration_ms=int((time.time() - t0) * 1000),

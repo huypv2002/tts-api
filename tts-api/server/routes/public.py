@@ -146,11 +146,15 @@ async def job_status(
         raise HTTPException(403, "not your job")
     settings = load_settings()
     base = settings.get("public_base_url") or str(request.base_url).rstrip("/")
+    err = j.get("error")
+    if isinstance(err, str) and len(err) > 280:
+        # keep poll JSON small / client-friendly (Camoufox dumps are huge)
+        err = err[:280].replace("\n", " ") + "…"
     out = {
         "id": j["id"],
         "status": j["status"],
         "chars": j["text_chars"],
-        "error": j.get("error"),
+        "error": err,
         "audio_bytes": j.get("audio_bytes"),
         "duration_ms": j.get("duration_ms"),
         "created_at": j.get("created_at"),
