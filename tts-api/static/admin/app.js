@@ -29,12 +29,12 @@ async function api(path, opts = {}) {
 
 function showLogin() {
   $("#login-view").classList.remove("hidden");
-  $("#app-view").style.display = "none";
+  $("#app-view").classList.add("hidden");
 }
 
 function showApp() {
   $("#login-view").classList.add("hidden");
-  $("#app-view").style.display = "block";
+  $("#app-view").classList.remove("hidden");
 }
 
 async function login(e) {
@@ -61,15 +61,19 @@ async function logout() {
 
 function setNav(page) {
   state.page = page;
-  $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
-  $("#page-title").textContent = ({
-    overview: "Overview",
-    keys: "API Keys",
-    proxies: "Proxy Pool",
-    settings: "Settings",
-    jobs: "Jobs",
-    usage: "Usage",
-  })[page] || page;
+  $$(".nav-btn[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
+  const titles = {
+    overview: ["Overview", "Fleet health, proxies & recent jobs"],
+    keys: ["API Keys", "Create keys, quotas and concurrency limits"],
+    proxies: ["Proxy Pool", "Rotating residential slots"],
+    settings: ["Settings", "Global defaults for new keys & workers"],
+    jobs: ["Jobs", "Queue history and failures"],
+    usage: ["Usage", "Daily character & job consumption"],
+  };
+  const t = titles[page] || [page, ""];
+  $("#page-title").textContent = t[0];
+  const sub = $("#page-sub");
+  if (sub) sub.textContent = t[1];
 }
 
 async function navigate(page) {
@@ -106,14 +110,15 @@ async function renderOverview(root) {
   const d = await api("/dashboard");
   const st = d.usage.jobs_by_status || {};
   const px = d.proxy || {};
+  const queued = (st.queued || 0) + (st.running || 0);
   root.innerHTML = `
     <div class="cards">
-      <div class="card"><div class="k">API keys</div><div class="v">${d.keys_count}</div></div>
-      <div class="card"><div class="k">Proxy ready</div><div class="v ok">${px.ready ?? 0}/${px.total ?? 0}</div></div>
-      <div class="card"><div class="k">Jobs done</div><div class="v ok">${st.done || 0}</div></div>
-      <div class="card"><div class="k">Queued / running</div><div class="v warn">${(st.queued||0)+(st.running||0)}</div></div>
-      <div class="card"><div class="k">Failed</div><div class="v">${st.failed || 0}</div></div>
-      <div class="card"><div class="k">Max chars</div><div class="v">${d.settings.default_max_chars}</div></div>
+      <div class="card"><div class="k">API keys</div><div class="v">${d.keys_count}</div><div class="hint">active tenants</div></div>
+      <div class="card"><div class="k">Proxy ready</div><div class="v ok">${px.ready ?? 0}<span style="font-size:0.9rem;color:var(--muted)">/${px.total ?? 0}</span></div><div class="hint">slots available</div></div>
+      <div class="card"><div class="k">Jobs done</div><div class="v ok">${st.done || 0}</div><div class="hint">all time status</div></div>
+      <div class="card"><div class="k">In flight</div><div class="v warn">${queued}</div><div class="hint">queued + running</div></div>
+      <div class="card"><div class="k">Failed</div><div class="v ${st.failed ? "danger" : ""}">${st.failed || 0}</div><div class="hint">needs attention</div></div>
+      <div class="card"><div class="k">Max chars</div><div class="v">${d.settings.default_max_chars}</div><div class="hint">default / request</div></div>
     </div>
     <div class="panel">
       <h3>Proxy slots</h3>
@@ -447,7 +452,9 @@ async function renderUsage(root) {
 // boot
 $("#login-form").addEventListener("submit", login);
 $("#btn-logout").addEventListener("click", logout);
-$$(".nav-btn").forEach((b) => b.addEventListener("click", () => navigate(b.dataset.page)));
+$$(".nav-btn[data-page]").forEach((b) => b.addEventListener("click", () => navigate(b.dataset.page)));
+const btnRefresh = $("#btn-refresh");
+if (btnRefresh) btnRefresh.addEventListener("click", () => navigate(state.page || "overview"));
 
 (async () => {
   if (!state.token) {

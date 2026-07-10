@@ -47,17 +47,21 @@ def load_settings() -> dict:
     base = _read_json(SETTINGS_EXAMPLE, {})
     cur = _read_json(SETTINGS_PATH, {})
     merged = {**base, **cur}
-    # env overrides
-    if os.environ.get("TTS_ADMIN_PASSWORD"):
-        merged["admin_password"] = os.environ["TTS_ADMIN_PASSWORD"]
-    if os.environ.get("TTS_ADMIN_SECRET"):
-        merged["admin_session_secret"] = os.environ["TTS_ADMIN_SECRET"]
-    if os.environ.get("TTS_HOST"):
+    # Env fills gaps only — settings.json (admin UI) wins over .env for password
+    if not (cur.get("admin_password") or "").strip():
+        if os.environ.get("TTS_ADMIN_PASSWORD"):
+            merged["admin_password"] = os.environ["TTS_ADMIN_PASSWORD"]
+    if not (cur.get("admin_session_secret") or "").strip():
+        if os.environ.get("TTS_ADMIN_SECRET"):
+            merged["admin_session_secret"] = os.environ["TTS_ADMIN_SECRET"]
+    if os.environ.get("TTS_HOST") and "host" not in cur:
         merged["host"] = os.environ["TTS_HOST"]
-    if os.environ.get("TTS_PORT"):
+    if os.environ.get("TTS_PORT") and "port" not in cur:
         merged["port"] = int(os.environ["TTS_PORT"])
     if os.environ.get("TTS_PUBLIC_BASE_URL"):
-        merged["public_base_url"] = os.environ["TTS_PUBLIC_BASE_URL"].rstrip("/")
+        # public URL often set via env on deploy
+        if not (cur.get("public_base_url") or "").strip():
+            merged["public_base_url"] = os.environ["TTS_PUBLIC_BASE_URL"].rstrip("/")
     # safe defaults
     merged.setdefault("admin_password", "admin123")
     merged.setdefault("admin_session_secret", secrets.token_hex(24))
@@ -76,19 +80,35 @@ def load_settings() -> dict:
     merged.setdefault("default_model", "eleven_v3")
     merged.setdefault("default_lang", "en")
     if not SETTINGS_PATH.exists():
-        _write_json(SETTINGS_PATH, {k: v for k, v in merged.items() if k not in ()})
+        _write_json(SETTINGS_PATH, {k: v for k, v in merged.items()})
     return merged
 
 
 def save_settings(patch: dict) -> dict:
-    cur = load_settings()
-    cur.update(patch)
-    # don't dump secrets empty
-    _write_json(
-        SETTINGS_PATH,
-        {k: v for k, v in cur.items()},
-    )
-    return cur
+    # Read file only (avoid re-applying env over password)
+    cur = {**_read_json(SETTINGS_EXAMPLE, {}), **_read_json(SETTINGS_PATH, {})}
+    cur.update({k: v for k, v in patch.items() if v is not None and v != ""})
+    _write_json(SETTINGS_PATH, cur)
+    # Keep .env in sync for password so restart stays consistent
+    if "admin_password" in patch and patch["admin_password"]:
+        _sync_env_password(str(patch["admin_password"]))
+    return load_settings()
+
+
+def _sync_env_password(password: str) -> None:
+    env_path = ROOT / ".env"
+    lines: list[str] = []
+    found = False
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("TTS_ADMIN_PASSWORD="):
+                lines.append(f"TTS_ADMIN_PASSWORD={password}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"TTS_ADMIN_PASSWORD={password}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def load_proxies_file() -> list[dict]:

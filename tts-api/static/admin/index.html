@@ -3,43 +3,70 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TTS API Admin</title>
+  <title>TTS Control · Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/admin/styles.css" />
 </head>
 <body>
+  <div class="bg-orb orb-a"></div>
+  <div class="bg-orb orb-b"></div>
+  <div class="bg-grid"></div>
+
   <div id="login-view">
-    <form class="login-card" id="login-form">
-      <h1>TTS Admin</h1>
-      <p>Manage API keys, proxies, quota & usage</p>
-      <div class="field">
-        <label>Admin password</label>
-        <input id="password" type="password" autocomplete="current-password" required />
+    <form class="login-card glass" id="login-form">
+      <div class="login-logo">
+        <div class="logo-mark">T</div>
+        <div>
+          <div class="logo-title">TTS Control</div>
+          <div class="logo-sub">Admin console</div>
+        </div>
       </div>
-      <button class="primary" type="submit" style="width:100%">Sign in</button>
+      <p class="login-desc">Keys · proxies · quota · usage</p>
+      <div class="field">
+        <label>Password</label>
+        <input id="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
+      </div>
+      <button class="primary btn-block" type="submit">Sign in</button>
       <div class="error" id="login-error"></div>
     </form>
   </div>
 
-  <div id="app-view">
+  <div id="app-view" class="hidden">
     <div class="shell">
-      <aside class="sidebar">
-        <div class="brand">TTS <span>API</span></div>
-        <button class="nav-btn active" data-page="overview">Overview</button>
-        <button class="nav-btn" data-page="keys">API Keys</button>
-        <button class="nav-btn" data-page="proxies">Proxies</button>
-        <button class="nav-btn" data-page="settings">Settings</button>
-        <button class="nav-btn" data-page="jobs">Jobs</button>
-        <button class="nav-btn" data-page="usage">Usage</button>
-        <div class="spacer"></div>
-        <button class="nav-btn" id="btn-logout">Logout</button>
-      </aside>
-      <main class="main">
-        <div class="topbar">
+      <aside class="sidebar glass">
+        <div class="brand">
+          <div class="logo-mark sm">T</div>
           <div>
-            <h2 id="page-title">Overview</h2>
-            <div class="muted">Multi-tenant TTS · proxy pool · Cloudflare Tunnel ready</div>
+            <div class="brand-name">TTS Control</div>
+            <div class="brand-tag">multi-tenant</div>
           </div>
         </div>
+        <nav class="nav">
+          <button class="nav-btn active" data-page="overview"><span class="nav-ico">◈</span> Overview</button>
+          <button class="nav-btn" data-page="keys"><span class="nav-ico">🔑</span> API Keys</button>
+          <button class="nav-btn" data-page="proxies"><span class="nav-ico">⇄</span> Proxies</button>
+          <button class="nav-btn" data-page="settings"><span class="nav-ico">⚙</span> Settings</button>
+          <button class="nav-btn" data-page="jobs"><span class="nav-ico">▤</span> Jobs</button>
+          <button class="nav-btn" data-page="usage"><span class="nav-ico">◔</span> Usage</button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="pill live" id="live-pill">● live</div>
+          <button class="nav-btn logout" id="btn-logout">Logout</button>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h2 id="page-title">Overview</h2>
+            <p class="muted" id="page-sub">Realtime ops for your TTS fleet</p>
+          </div>
+          <div class="top-actions">
+            <a class="chip" href="https://tts-origin.liveyt.pro/v1/health" target="_blank" rel="noopener">/v1/health</a>
+            <button class="ghost" id="btn-refresh" type="button">Refresh</button>
+          </div>
+        </header>
         <div id="content"></div>
       </main>
     </div>
