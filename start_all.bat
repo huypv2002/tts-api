@@ -83,6 +83,10 @@ set "PYTHONPATH=%APP%;%ROOT%"
 set "TTS_PORT=8787"
 set "TTS_PUBLIC_BASE_URL=https://tts-origin.liveyt.pro"
 
+REM Ensure playwright is not 1.61+ (Camoufox isMobile crash)
+echo [0/2] Check playwright version...
+"%VENV_PY%" -m pip install "playwright>=1.48.0,<1.61.0" -q
+
 echo [1/2] Start API server :8787 ...
 start "TTS-API-Server" cmd /k "cd /d "%APP%" && set PYTHONPATH=%APP%;%ROOT% && set TTS_PORT=8787 && "%VENV_PY%" -m uvicorn server.main:app --host 0.0.0.0 --port 8787"
 

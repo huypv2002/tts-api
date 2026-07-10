@@ -86,6 +86,9 @@ Write-Host "Installing Python packages..."
 & $VenvPy -m pip install -U pip
 & $VenvPip install -r requirements.txt
 & $VenvPip install camoufox tls-client
+# CRITICAL: Playwright 1.61+ breaks Camoufox (isMobile viewport crash)
+Write-Host "Pinning playwright less than 1.61 (Camoufox fix)..."
+& $VenvPip install "playwright>=1.48.0,<1.61.0"
 Write-Host "Fetching Camoufox browser (may take a few minutes)..."
 & $VenvPy -m camoufox fetch
 
