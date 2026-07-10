@@ -343,34 +343,48 @@ async function renderProxies(root) {
 
 async function renderSettings(root) {
   const s = await api("/settings");
-  const fields = [
-    ["default_max_chars", "Default max chars / request"],
-    ["hard_max_chars", "Hard max chars (ceiling)"],
-    ["default_quota_chars_day", "Default quota chars / day"],
-    ["default_quota_jobs_day", "Default quota jobs / day"],
-    ["default_max_concurrent", "Default max concurrent jobs / key"],
-    ["inflight_per_proxy", "In-flight jobs per proxy slot"],
-    ["worker_count", "Worker processes (restart to apply fully)"],
-    ["public_base_url", "Public base URL (Cloudflare Tunnel)"],
-    ["default_voice", "Default voice ID"],
-    ["default_model", "Default model"],
-    ["default_lang", "Default language"],
+  const numFields = [
+    ["default_max_chars", "Default max chars / request", "number"],
+    ["hard_max_chars", "Hard max chars (ceiling)", "number"],
+    ["default_quota_chars_day", "Default quota chars / day", "number"],
+    ["default_quota_jobs_day", "Default quota jobs / day", "number"],
+    ["default_max_concurrent", "Default max concurrent jobs / key", "number"],
+    ["inflight_per_proxy", "In-flight jobs per proxy slot", "number"],
+    ["worker_count", "Worker count (restart to fully apply)", "number"],
   ];
+  const strFields = [
+    ["public_base_url", "Public base URL (Cloudflare Tunnel)", "text"],
+    ["default_voice", "Default voice ID", "text"],
+    ["default_model", "Default model", "text"],
+    ["default_lang", "Default language", "text"],
+  ];
+  const allFields = [...numFields, ...strFields];
   root.innerHTML = `
     <div class="panel">
       <h3>Global settings</h3>
+      <p class="muted" style="margin:-0.4rem 0 1rem">
+        <strong>Default max chars</strong> chỉ áp dụng cho API key <em>mới</em>.
+        Key cũ giữ max_chars riêng — tick ô bên dưới để ghi đè tất cả keys.
+      </p>
       <div class="grid-2">
-        ${fields.map(([k, label]) => `
+        ${allFields.map(([k, label, type]) => `
           <div class="field">
             <label>${esc(label)}</label>
-            <input id="s-${k}" value="${esc(s[k] ?? "")}" />
+            <input id="s-${k}" type="${type}" value="${esc(s[k] ?? "")}" ${type === "number" ? 'min="1" step="1"' : ""} />
           </div>`).join("")}
         <div class="field">
           <label>New admin password (optional)</label>
-          <input id="s-admin_password" type="password" placeholder="leave blank to keep" />
+          <input id="s-admin_password" type="password" placeholder="leave blank to keep" autocomplete="new-password" />
         </div>
       </div>
-      <button class="primary" id="s-save">Save settings</button>
+      <label class="row" style="cursor:pointer;color:var(--text);text-transform:none;letter-spacing:0;font-size:0.92rem;font-weight:500">
+        <input type="checkbox" id="s-apply-keys" style="width:auto" />
+        Apply max chars / quotas to <strong>all existing API keys</strong>
+      </label>
+      <div class="form-actions">
+        <button class="primary" id="s-save" type="button">Save settings</button>
+      </div>
+      <p class="muted" id="s-status" style="margin-top:0.75rem"></p>
     </div>
     <div class="panel">
       <h3>Public API quick ref</h3>
@@ -386,20 +400,41 @@ GET /v1/health</pre>
   `;
   $("#s-save").onclick = async () => {
     const body = {};
-    for (const [k] of fields) {
+    const status = $("#s-status");
+    status.textContent = "Saving…";
+    for (const [k, , type] of allFields) {
       const el = $(`#s-${k}`);
       if (!el) continue;
-      const v = el.value;
+      const v = (el.value || "").trim();
       if (v === "") continue;
-      body[k] = /chars|quota|concurrent|inflight|worker|port/i.test(k) && k !== "public_base_url" && k !== "default_voice" && k !== "default_model" && k !== "default_lang"
-        ? +v : v;
+      if (type === "number") {
+        const n = Number(v);
+        if (!Number.isFinite(n)) {
+          status.textContent = `Invalid number: ${k}`;
+          toast(`Invalid number: ${k}`);
+          return;
+        }
+        body[k] = Math.trunc(n);
+      } else {
+        body[k] = v;
+      }
     }
-    const pw = $("#s-admin_password").value;
+    const pw = ($("#s-admin_password").value || "").trim();
     if (pw) body.admin_password = pw;
+    body.apply_to_all_keys = !!$("#s-apply-keys").checked;
     try {
-      await api("/settings", { method: "PUT", body: JSON.stringify(body) });
-      toast("Settings saved");
-    } catch (e) { toast(e.message); }
+      const res = await api("/settings", { method: "PUT", body: JSON.stringify(body) });
+      const maxc = res.default_max_chars;
+      const ku = res.keys_updated || 0;
+      const msg = `Saved. default_max_chars=${maxc}` + (ku ? ` · updated ${ku} API key(s)` : "");
+      status.textContent = msg;
+      toast(msg);
+      // re-render so inputs show server values
+      await navigate("settings");
+    } catch (e) {
+      status.textContent = e.message;
+      toast(e.message);
+    }
   };
 }
 

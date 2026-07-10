@@ -52,6 +52,8 @@ class SettingsUpdate(BaseModel):
     default_model: Optional[str] = None
     default_lang: Optional[str] = None
     admin_password: Optional[str] = None
+    # when true: copy default_max_chars / quotas onto ALL existing API keys
+    apply_to_all_keys: Optional[bool] = False
 
 
 class ProxyUpsert(BaseModel):

@@ -85,16 +85,57 @@ async def get_settings(_: str = Depends(require_admin)):
 
 
 @router.put("/settings")
-async def put_settings(body: SettingsUpdate, _: str = Depends(require_admin)):
+async def put_settings(
+    body: SettingsUpdate,
+    _: str = Depends(require_admin),
+    db: Database = Depends(get_db),
+):
     patch = body.model_dump(exclude_none=True)
+    apply_keys = bool(patch.pop("apply_to_all_keys", False))
     if "admin_password" in patch and not patch["admin_password"]:
         del patch["admin_password"]
+
+    # validate max chars range
+    if "default_max_chars" in patch:
+        try:
+            patch["default_max_chars"] = int(patch["default_max_chars"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "default_max_chars must be an integer")
+        if patch["default_max_chars"] < 1 or patch["default_max_chars"] > 10000:
+            raise HTTPException(400, "default_max_chars out of range (1-10000)")
+    if "hard_max_chars" in patch:
+        try:
+            patch["hard_max_chars"] = int(patch["hard_max_chars"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "hard_max_chars must be an integer")
+
     s = save_settings(patch)
-    return {
+
+    keys_updated = 0
+    if apply_keys:
+        key_patch = {}
+        if "default_max_chars" in patch:
+            key_patch["max_chars"] = patch["default_max_chars"]
+        if "default_quota_chars_day" in patch:
+            key_patch["quota_chars_day"] = patch["default_quota_chars_day"]
+        if "default_quota_jobs_day" in patch:
+            key_patch["quota_jobs_day"] = patch["default_quota_jobs_day"]
+        if "default_max_concurrent" in patch:
+            key_patch["max_concurrent"] = patch["default_max_concurrent"]
+        if key_patch:
+            rows = await db.list_api_keys()
+            for row in rows:
+                await db.update_api_key(row["id"], **key_patch)
+                keys_updated += 1
+
+    out = {
         k: v
         for k, v in s.items()
         if k not in ("admin_password", "admin_session_secret")
     }
+    out["keys_updated"] = keys_updated
+    out["saved"] = True
+    return out
 
 
 @router.get("/keys")
