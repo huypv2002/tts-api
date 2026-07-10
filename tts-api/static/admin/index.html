@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTS API Admin</title>
+  <link rel="stylesheet" href="/static/admin/styles.css" />
+</head>
+<body>
+  <div id="login-view">
+    <form class="login-card" id="login-form">
+      <h1>TTS Admin</h1>
+      <p>Manage API keys, proxies, quota & usage</p>
+      <div class="field">
+        <label>Admin password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button class="primary" type="submit" style="width:100%">Sign in</button>
+      <div class="error" id="login-error"></div>
+    </form>
+  </div>
+
+  <div id="app-view">
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">TTS <span>API</span></div>
+        <button class="nav-btn active" data-page="overview">Overview</button>
+        <button class="nav-btn" data-page="keys">API Keys</button>
+        <button class="nav-btn" data-page="proxies">Proxies</button>
+        <button class="nav-btn" data-page="settings">Settings</button>
+        <button class="nav-btn" data-page="jobs">Jobs</button>
+        <button class="nav-btn" data-page="usage">Usage</button>
+        <div class="spacer"></div>
+        <button class="nav-btn" id="btn-logout">Logout</button>
+      </aside>
+      <main class="main">
+        <div class="topbar">
+          <div>
+            <h2 id="page-title">Overview</h2>
+            <div class="muted">Multi-tenant TTS · proxy pool · Cloudflare Tunnel ready</div>
+          </div>
+        </div>
+        <div id="content"></div>
+      </main>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/static/admin/app.js"></script>
+</body>
+</html>

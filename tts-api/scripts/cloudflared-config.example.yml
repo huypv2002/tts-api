@@ -1,0 +1,15 @@
+# Copy to cloudflared-config.yml (gitignored) after:
+#   cloudflared tunnel login
+#   cloudflared tunnel create tts-api
+#   cloudflared tunnel route dns tts-api tts.yourdomain.com
+#
+# credentials-file path on Windows:
+#   C:\Users\<you>\.cloudflared\<TUNNEL_UUID>.json
+
+tunnel: tts-api
+credentials-file: C:\Users\Administrator\.cloudflared\YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: tts.yourdomain.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404

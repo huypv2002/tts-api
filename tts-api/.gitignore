@@ -1,0 +1,15 @@
+.env
+data/db/*.db
+data/db/*.db-*
+data/audio/**
+!data/audio/.gitkeep
+config/settings.json
+config/proxies.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/bootstrap_key.txt
+*.log
+cloudflared-config.yml
+.DS_Store

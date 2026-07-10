@@ -1,0 +1,40 @@
+# deps / envs
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# secrets / local runtime
+**/.proxyxoay.json
+**/.iplocate_key
+**/config/settings.json
+**/config/proxies.json
+**/data/db/
+**/data/audio/**
+!**/data/audio/.gitkeep
+**/data/bootstrap_key.txt
+**/cloudflared-config.yml
+**/.cloudflared/
+
+# browser profiles / caches
+*_profile/
+headed_stress_profile/
+proxy_tts_profile/
+vn_proxy_profile/
+widget_profile/
+
+# generated media / lab dumps
+*.mp3
+*.png
+tts_loop_1000/
+tts_loop_1000_archive/
+tts_loop_out/
+elevenlabs_js/
+elevenlabs_js_live/
+*.log
+
+# large lock optional keep package-lock
+# package-lock.json

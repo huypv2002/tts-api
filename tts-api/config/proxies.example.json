@@ -1,0 +1,26 @@
+{
+  "proxies": [
+    {
+      "id": "px1",
+      "label": "EU rotating #1",
+      "enabled": true,
+      "provider": "proxyxoay_net",
+      "api_key": "YOUR_PROXYXOAY_API_KEY",
+      "username": "user",
+      "password": "pass",
+      "host": "host.example.com",
+      "port": 8570
+    },
+    {
+      "id": "px2",
+      "label": "EU rotating #2",
+      "enabled": false,
+      "provider": "proxyxoay_net",
+      "api_key": "",
+      "username": "",
+      "password": "",
+      "host": "",
+      "port": 8570
+    }
+  ]
+}
