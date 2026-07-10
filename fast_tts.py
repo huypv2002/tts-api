@@ -171,13 +171,27 @@ async def solve_hsw(req_token: str, proxy_http: str | None) -> str:
         _hsw_js_cache[cache_key] = hsw_js
         log(f"  [2/4] hsw.js fetched ({len(hsw_js)//1024}KB)")
 
-    opts: dict = {"headless": True, "os": "windows"}
+    opts: dict = {
+        "headless": True,
+        "os": "windows",
+        "window": (1280, 720),
+    }
     if proxy_http:
+        # camoufox expects server URL; auth embedded in URL is fine
         opts["proxy"] = {"server": proxy_http}
 
-    browser = await AsyncCamoufox(**opts).start()
+    browser = None
+    page = None
     try:
-        page = await browser.new_page()
+        # Prefer async context manager; fall back to .start() for older camoufox
+        cm = AsyncCamoufox(**opts)
+        if hasattr(cm, "start"):
+            browser = await cm.start()
+        else:
+            browser = await cm.__aenter__()
+
+        page = await _camoufox_new_page(browser)
+
         await page.route(
             f"https://{HOST}/hsw",
             lambda r: r.fulfill(
@@ -230,9 +244,123 @@ async def solve_hsw(req_token: str, proxy_http: str | None) -> str:
         return result
     finally:
         try:
-            await browser.stop()
+            if page is not None:
+                await page.close()
         except Exception:
             pass
+        try:
+            if browser is not None:
+                if hasattr(browser, "stop"):
+                    await browser.stop()
+                elif hasattr(browser, "close"):
+                    await browser.close()
+        except Exception:
+            pass
+
+
+async def _camoufox_new_page(browser):
+    """
+    Create a page without triggering Playwright 1.61+ Firefox CDP bug:
+      Browser.setDefaultViewport ... isMobile not described in this scheme
+    """
+    # BrowserContext already (persistent_context=True path)
+    if hasattr(browser, "pages") and not hasattr(browser, "new_context"):
+        try:
+            return await browser.new_page()
+        except Exception:
+            pages = browser.pages
+            if pages:
+                return pages[0]
+            raise
+
+    # Prefer context with no viewport (skips mobile viewport flags when possible)
+    last_err: Exception | None = None
+    for kwargs in (
+        {"viewport": None},
+        {"no_viewport": True},
+        {"viewport": {"width": 1280, "height": 720}},
+        {},
+    ):
+        try:
+            if hasattr(browser, "new_context"):
+                ctx = await browser.new_context(**kwargs)
+                page = await ctx.new_page()
+                return page
+        except TypeError:
+            # older playwright may not accept no_viewport / viewport=None
+            continue
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if "isMobile" not in msg and "setDefaultViewport" not in msg:
+                # unrelated error — keep trying lighter opts only if viewport-related
+                if "viewport" not in msg.lower():
+                    continue
+            continue
+
+    # Last resort: direct new_page
+    try:
+        return await browser.new_page()
+    except Exception as e:
+        last_err = e
+
+    # Monkey-patch: strip isMobile from CDP if playwright still injects it
+    try:
+        return await _new_page_strip_ismobile(browser)
+    except Exception as e:
+        last_err = e
+
+    raise RuntimeError(
+        f"Camoufox new_page failed (playwright/camoufox viewport mismatch). "
+        f"Pin playwright<1.61 on the server. Last error: {last_err}"
+    )
+
+
+async def _new_page_strip_ismobile(browser):
+    """
+    Patch the browser connection session to drop isMobile from setDefaultViewport.
+    Works around Playwright 1.61 + Camoufox Firefox Juggler incompatibility.
+    """
+    # Get underlying connection from first context or browser
+    browser_impl = getattr(browser, "_impl_obj", browser)
+    conn = getattr(browser_impl, "_connection", None) or getattr(
+        getattr(browser_impl, "_browser", None), "_connection", None
+    )
+    if conn is None:
+        # try contexts
+        for ctx in getattr(browser, "contexts", []) or []:
+            impl = getattr(ctx, "_impl_obj", ctx)
+            conn = getattr(impl, "_connection", None)
+            if conn:
+                break
+    if conn is None:
+        raise RuntimeError("cannot access playwright connection to patch viewport")
+
+    original = conn.send
+
+    async def send_filtered(method, params=None, *args, **kwargs):
+        if params is None:
+            params = {}
+        # method may be str like "Browser.setDefaultViewport"
+        m = method if isinstance(method, str) else str(method)
+        if "setDefaultViewport" in m and isinstance(params, dict):
+            params = dict(params)
+            vp = params.get("viewport")
+            if isinstance(vp, dict) and "isMobile" in vp:
+                vp = dict(vp)
+                vp.pop("isMobile", None)
+                params["viewport"] = vp
+            params.pop("isMobile", None)
+        return await original(method, params, *args, **kwargs)
+
+    conn.send = send_filtered  # type: ignore
+    try:
+        if hasattr(browser, "new_context"):
+            ctx = await browser.new_context(viewport={"width": 1280, "height": 720})
+            return await ctx.new_page()
+        return await browser.new_page()
+    finally:
+        conn.send = original  # type: ignore
 
 
 def submit_captcha(
