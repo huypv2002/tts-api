@@ -67,6 +67,28 @@ DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
 DEFAULT_MODEL = "eleven_v3"
 
 _hsw_js_cache: dict[str, str] = {}
+_hcaptcha_ver_cache: dict[str, tuple[float, str]] = {}  # proxy_key -> (ts, version)
+_HCAPTCHA_VER_TTL = 300.0
+
+# Reuse Camoufox for HSW (biggest speed win — avoid cold start ~5–15s every job)
+_hsw_browser = None
+_hsw_page = None
+_hsw_proxy_key: str | None = None
+_hsw_js_on_page: str | None = None
+_hsw_lock: asyncio.Lock | None = None
+_hsw_solves = 0
+_HSW_RECYCLE_EVERY = 40  # relaunch browser periodically to avoid leaks
+
+
+def _proxy_key(proxy_http: str | None) -> str:
+    return proxy_http or "__direct__"
+
+
+def _get_hsw_lock() -> asyncio.Lock:
+    global _hsw_lock
+    if _hsw_lock is None:
+        _hsw_lock = asyncio.Lock()
+    return _hsw_lock
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -125,14 +147,22 @@ def _tls_session(proxy_http: str | None):
 
 
 def get_hcaptcha_materials(proxy_http: str | None) -> tuple[str, str, dict]:
-    """checksiteconfig → (req_token, version, config)."""
+    """checksiteconfig → (req_token, version, config). Caches api.js version briefly."""
     session = _tls_session(proxy_http)
     t0 = time.time()
-    api_js = session.get(
-        "https://hcaptcha.com/1/api.js?render=explicit&onload=hcaptchaOnLoad"
-    ).text
-    versions = re.findall(r"v1/([A-Za-z0-9]+)/static", api_js)
-    version = versions[1] if len(versions) > 1 else (versions[0] if versions else "unknown")
+    pk = _proxy_key(proxy_http)
+    now = time.time()
+    version = None
+    cached = _hcaptcha_ver_cache.get(pk)
+    if cached and (now - cached[0]) < _HCAPTCHA_VER_TTL:
+        version = cached[1]
+    if not version:
+        api_js = session.get(
+            "https://hcaptcha.com/1/api.js?render=explicit&onload=hcaptchaOnLoad"
+        ).text
+        versions = re.findall(r"v1/([A-Za-z0-9]+)/static", api_js)
+        version = versions[1] if len(versions) > 1 else (versions[0] if versions else "unknown")
+        _hcaptcha_ver_cache[pk] = (now, version)
 
     config = session.post(
         "https://api2.hcaptcha.com/checksiteconfig",
@@ -153,109 +183,157 @@ def get_hcaptcha_materials(proxy_http: str | None) -> tuple[str, str, dict]:
     return config["c"]["req"], version, config
 
 
-async def solve_hsw(req_token: str, proxy_http: str | None) -> str:
-    """Camoufox: inject hsw.js → hsw(req)."""
-    t0 = time.time()
+def _fetch_hsw_js(req_token: str, proxy_http: str | None) -> tuple[str, str]:
     decoded = _decode_jwt_payload(req_token)
     cache_key = decoded["l"]
-
     if cache_key in _hsw_js_cache:
-        hsw_js = _hsw_js_cache[cache_key]
-        log(f"  [2/4] hsw.js cache hit ({len(hsw_js)//1024}KB)")
-    else:
-        session = _tls_session(proxy_http)
-        hsw_url = "https://newassets.hcaptcha.com" + cache_key + "/hsw.js"
-        hsw_js = session.get(hsw_url).text
-        if not hsw_js or "function" not in hsw_js:
-            raise RuntimeError("hsw.js fetch invalid")
-        _hsw_js_cache[cache_key] = hsw_js
-        log(f"  [2/4] hsw.js fetched ({len(hsw_js)//1024}KB)")
+        return cache_key, _hsw_js_cache[cache_key]
+    session = _tls_session(proxy_http)
+    hsw_url = "https://newassets.hcaptcha.com" + cache_key + "/hsw.js"
+    hsw_js = session.get(hsw_url).text
+    if not hsw_js or "function" not in hsw_js:
+        raise RuntimeError("hsw.js fetch invalid")
+    _hsw_js_cache[cache_key] = hsw_js
+    return cache_key, hsw_js
 
-    opts: dict = {
-        "headless": True,
-        "os": "windows",
-        "window": (1280, 720),
-    }
-    if proxy_http:
-        # camoufox expects server URL; auth embedded in URL is fine
-        opts["proxy"] = {"server": proxy_http}
 
-    browser = None
-    page = None
+async def _close_hsw_browser() -> None:
+    global _hsw_browser, _hsw_page, _hsw_proxy_key, _hsw_js_on_page, _hsw_solves
     try:
-        # Prefer async context manager; fall back to .start() for older camoufox
+        if _hsw_page is not None:
+            await _hsw_page.close()
+    except Exception:
+        pass
+    try:
+        if _hsw_browser is not None:
+            if hasattr(_hsw_browser, "stop"):
+                await _hsw_browser.stop()
+            elif hasattr(_hsw_browser, "close"):
+                await _hsw_browser.close()
+    except Exception:
+        pass
+    _hsw_browser = None
+    _hsw_page = None
+    _hsw_proxy_key = None
+    _hsw_js_on_page = None
+    _hsw_solves = 0
+
+
+async def _ensure_hsw_page(proxy_http: str | None, hsw_js: str, cache_key: str):
+    """Keep one warm Camoufox page per process; relaunch on proxy change / errors."""
+    global _hsw_browser, _hsw_page, _hsw_proxy_key, _hsw_js_on_page, _hsw_solves
+
+    pk = _proxy_key(proxy_http)
+    need_new = (
+        _hsw_page is None
+        or _hsw_browser is None
+        or _hsw_proxy_key != pk
+        or _hsw_solves >= _HSW_RECYCLE_EVERY
+    )
+    if not need_new:
+        try:
+            ok = await _hsw_page.evaluate("typeof hsw === 'function'")
+            if ok and _hsw_js_on_page == cache_key:
+                return _hsw_page
+            # reinject if page alive but wrong/missing hsw
+            if ok and _hsw_js_on_page != cache_key:
+                await _hsw_page.evaluate(hsw_js)
+                _hsw_js_on_page = cache_key
+                return _hsw_page
+        except Exception:
+            need_new = True
+
+    if need_new:
+        await _close_hsw_browser()
+        opts: dict = {
+            "headless": True,
+            "os": "windows",
+            "window": (1280, 720),
+        }
+        if proxy_http:
+            opts["proxy"] = {"server": proxy_http}
         cm = AsyncCamoufox(**opts)
         if hasattr(cm, "start"):
-            browser = await cm.start()
+            _hsw_browser = await cm.start()
         else:
-            browser = await cm.__aenter__()
-
-        page = await _camoufox_new_page(browser)
-
-        await page.route(
-            f"https://{HOST}/hsw",
-            lambda r: r.fulfill(
-                status=200,
-                content_type="text/html",
-                body="<html><head></head><body></body></html>",
-            ),
-        )
-        await page.goto(f"https://{HOST}/hsw", wait_until="domcontentloaded", timeout=15000)
-        await page.evaluate(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
-        )
-
-        injected = False
+            _hsw_browser = await cm.__aenter__()
+        _hsw_page = await _camoufox_new_page(_hsw_browser)
+        _hsw_proxy_key = pk
+        _hsw_solves = 0
         try:
-            await page.add_script_tag(content=hsw_js)
-            await asyncio.sleep(0.15)
-            if await page.evaluate("typeof hsw === 'function'"):
-                injected = True
-        except Exception:
-            pass
-
-        if not injected:
-            await page.evaluate(
-                f"""(function() {{
-                    const s = document.createElement('script');
-                    s.textContent = {json.dumps(hsw_js)};
-                    document.head.appendChild(s);
-                }})();"""
+            await _hsw_page.route(
+                f"https://{HOST}/hsw",
+                lambda r: r.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<html><head></head><body></body></html>",
+                ),
             )
-            await asyncio.sleep(0.15)
-            if not await page.evaluate("typeof hsw === 'function'"):
-                await page.evaluate(hsw_js)
-                await asyncio.sleep(0.15)
+        except Exception:
+            pass
+        # about:blank is faster than full goto when possible
+        try:
+            await _hsw_page.goto(
+                f"https://{HOST}/hsw", wait_until="domcontentloaded", timeout=12000
+            )
+        except Exception:
+            await _hsw_page.goto("about:blank", wait_until="domcontentloaded", timeout=8000)
+        try:
+            await _hsw_page.evaluate(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
+            )
+        except Exception:
+            pass
 
-        if not await page.evaluate("typeof hsw === 'function'"):
+    # inject hsw
+    injected = False
+    try:
+        await _hsw_page.add_script_tag(content=hsw_js)
+        if await _hsw_page.evaluate("typeof hsw === 'function'"):
+            injected = True
+    except Exception:
+        pass
+    if not injected:
+        await _hsw_page.evaluate(hsw_js)
+        if not await _hsw_page.evaluate("typeof hsw === 'function'"):
             raise RuntimeError("hsw function not available after inject")
+    _hsw_js_on_page = cache_key
+    return _hsw_page
 
+
+async def solve_hsw(req_token: str, proxy_http: str | None) -> str:
+    """Camoufox HSW — reuses warm browser (fast path after first solve)."""
+    t0 = time.time()
+    cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req_token, proxy_http)
+    log(f"  [2/4] hsw.js ready ({len(hsw_js)//1024}KB)")
+
+    async with _get_hsw_lock():
+        global _hsw_solves
         try:
+            page = await _ensure_hsw_page(proxy_http, hsw_js, cache_key)
             result = await page.evaluate("(req) => hsw(req)", req_token)
+            if not result:
+                raise RuntimeError("hsw() returned empty")
+            _hsw_solves += 1
+            log(
+                f"  [2/4] HSW solved ({time.time()-t0:.1f}s, len={len(str(result))}, "
+                f"warm=#{_hsw_solves})"
+            )
+            return result
         except Exception as e:
-            # stale hsw.js cache / wasm fail → clear & rethrow for retry
-            if "WebAssembly" in str(e) or "hsw" in str(e).lower():
+            # recycle browser and retry once
+            msg = str(e).lower()
+            if "webassembly" in msg or "hsw" in msg or "target closed" in msg or "ismobile" in msg:
                 _hsw_js_cache.pop(cache_key, None)
-                _hsw_js_cache.clear()
-            raise
-        if not result:
-            raise RuntimeError("hsw() returned empty")
-        log(f"  [2/4] HSW solved ({time.time()-t0:.1f}s, len={len(str(result))})")
-        return result
-    finally:
-        try:
-            if page is not None:
-                await page.close()
-        except Exception:
-            pass
-        try:
-            if browser is not None:
-                if hasattr(browser, "stop"):
-                    await browser.stop()
-                elif hasattr(browser, "close"):
-                    await browser.close()
-        except Exception:
-            pass
+            log(f"  [2/4] HSW warm fail, relaunch: {type(e).__name__}: {e}"[:160])
+            await _close_hsw_browser()
+            page = await _ensure_hsw_page(proxy_http, hsw_js, cache_key)
+            result = await page.evaluate("(req) => hsw(req)", req_token)
+            if not result:
+                raise RuntimeError("hsw() returned empty after relaunch")
+            _hsw_solves += 1
+            log(f"  [2/4] HSW solved after relaunch ({time.time()-t0:.1f}s)")
+            return result
 
 
 async def _camoufox_new_page(browser):
@@ -462,10 +540,26 @@ async def call_tts(
 
 
 async def solve_token(proxy_http: str | None) -> str:
+    """
+    Full captcha token. Materials fetch is thread-offloaded; HSW uses warm browser.
+    """
     req, version, config = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
     hsw = await solve_hsw(req, proxy_http)
     token = await asyncio.to_thread(submit_captcha, hsw, version, config, proxy_http)
     return token
+
+
+async def warm_hsw(proxy_http: str | None = None) -> None:
+    """Optional: pre-launch Camoufox so first user request is faster."""
+    try:
+        # dummy path: fetch materials + load page with current hsw.js if possible
+        req, _, _ = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
+        cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req, proxy_http)
+        async with _get_hsw_lock():
+            await _ensure_hsw_page(proxy_http, hsw_js, cache_key)
+        log("  [warm] Camoufox HSW page ready")
+    except Exception as e:
+        log(f"  [warm] skip: {e}")
 
 
 # proxyxoay.net rotating residential API

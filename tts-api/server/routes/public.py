@@ -103,6 +103,13 @@ async def create_tts(
             "speed": body.speed,
         }
     )
+    # wake workers immediately (no 0.4s idle lag)
+    try:
+        from ..services.tts_worker import notify_job
+
+        notify_job()
+    except Exception:
+        pass
 
     base = settings.get("public_base_url") or str(request.base_url).rstrip("/")
     resp = {
@@ -120,13 +127,13 @@ async def create_tts(
         )
 
     if body.wait:
-        # poll up to 90s
+        # tighter poll for sync clients
         deadline = time.time() + 90
         while time.time() < deadline:
             j = await db.get_job(job_id)
             if j and j["status"] in ("done", "failed"):
                 return await job_status(job_id, request, key, db)
-            await __import__("asyncio").sleep(0.5)
+            await __import__("asyncio").sleep(0.2)
         resp["status"] = "running"
         resp["note"] = (resp.get("note") or "") + " wait timeout — poll poll_url"
     return resp
