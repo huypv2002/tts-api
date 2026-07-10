@@ -7,13 +7,14 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/admin/styles.css" />
+  <link rel="stylesheet" href="/static/admin/styles.css?v=3" />
 </head>
 <body>
   <div class="bg-orb orb-a"></div>
   <div class="bg-orb orb-b"></div>
   <div class="bg-grid"></div>
 
+  <!-- login visible by default so blank page never happens if JS fails -->
   <div id="login-view">
     <form class="login-card glass" id="login-form">
       <div class="login-logo">
@@ -33,7 +34,7 @@
     </form>
   </div>
 
-  <div id="app-view" class="hidden">
+  <div id="app-view" style="display:none">
     <div class="shell">
       <aside class="sidebar glass">
         <div class="brand">
@@ -72,6 +73,6 @@
     </div>
   </div>
   <div class="toast" id="toast"></div>
-  <script src="/static/admin/app.js"></script>
+  <script src="/static/admin/app.js?v=3"></script>
 </body>
 </html>

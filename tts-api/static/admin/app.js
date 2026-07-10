@@ -28,13 +28,29 @@ async function api(path, opts = {}) {
 }
 
 function showLogin() {
-  $("#login-view").classList.remove("hidden");
-  $("#app-view").classList.add("hidden");
+  const login = $("#login-view");
+  const app = $("#app-view");
+  if (login) {
+    login.classList.remove("hidden");
+    login.style.display = "";
+  }
+  if (app) {
+    app.classList.add("hidden");
+    app.style.display = "none";
+  }
 }
 
 function showApp() {
-  $("#login-view").classList.add("hidden");
-  $("#app-view").classList.remove("hidden");
+  const login = $("#login-view");
+  const app = $("#app-view");
+  if (login) {
+    login.classList.add("hidden");
+    login.style.display = "none";
+  }
+  if (app) {
+    app.classList.remove("hidden");
+    app.style.display = "";
+  }
 }
 
 async function login(e) {
