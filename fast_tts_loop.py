@@ -26,13 +26,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import json
 import re
+import sys
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 import httpx
+
+# Windows asyncio Proactor often warns on Camoufox pipe GC after clean exit
+if sys.platform == "win32":
+    warnings.filterwarnings("ignore", category=ResourceWarning)
 
 from fast_tts import (
     TokenPool,
@@ -748,8 +755,19 @@ async def run_loop(
         ]
         await asyncio.gather(*tasks)
     finally:
-        await token_pool.stop()
-        await close_hsw_farm()
+        try:
+            await token_pool.stop()
+        except Exception as e:
+            log(f"  [token-pool] stop: {e}"[:120])
+        try:
+            await close_hsw_farm()
+        except Exception as e:
+            log(f"  [hsw-farm] stop: {e}"[:120])
+        # Drain pending subprocess callbacks before leaving the loop (Windows)
+        try:
+            await asyncio.sleep(0.4)
+        except Exception:
+            pass
 
     summary = {
         "timestamp": datetime.now().isoformat(),
@@ -868,24 +886,32 @@ def main() -> int:
         f"text_file={text_file or '(inline)'} chunks={len(chunks)}"
     )
 
-    return asyncio.run(
-        run_loop(
-            chunks=chunks,
-            count=args.count,
-            outdir=Path(args.outdir),
-            voice_id=args.voice,
-            model_id=args.model,
-            lang=args.lang,
-            speed=args.speed,
-            max_per_ip=args.max_per_ip,
-            soft_cap_per_ip=args.soft_cap,
-            workers=max(1, args.workers),
-            max_transient_retries=max(1, args.max_transient_retries),
-            hsw_workers=args.hsw_workers or None,
-            token_target=args.token_target or None,
-            hsw_via_proxy=bool(args.hsw_via_proxy),
+    code = 1
+    try:
+        code = asyncio.run(
+            run_loop(
+                chunks=chunks,
+                count=args.count,
+                outdir=Path(args.outdir),
+                voice_id=args.voice,
+                model_id=args.model,
+                lang=args.lang,
+                speed=args.speed,
+                max_per_ip=args.max_per_ip,
+                soft_cap_per_ip=args.soft_cap,
+                workers=max(1, args.workers),
+                max_transient_retries=max(1, args.max_transient_retries),
+                hsw_workers=args.hsw_workers or None,
+                token_target=args.token_target or None,
+                hsw_via_proxy=bool(args.hsw_via_proxy),
+            )
         )
-    )
+    finally:
+        # Extra GC after loop closed — avoids noisy Windows pipe __del__ traces
+        gc.collect()
+        if sys.platform == "win32":
+            time.sleep(0.15)
+    return code
 
 
 if __name__ == "__main__":

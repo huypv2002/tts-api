@@ -263,6 +263,7 @@ class HswFarm:
             _env_bool("HSW_VIA_PROXY", False) if via_proxy is None else via_proxy
         )
         self._browser = None
+        self._cm = None  # AsyncCamoufox context manager (for clean stop)
         self._pages: list[_HswPage] = []
         self._free: asyncio.Queue | None = None
         self._start_lock = asyncio.Lock()
@@ -294,6 +295,7 @@ class HswFarm:
         if browser_proxy:
             opts["proxy"] = {"server": browser_proxy}
         cm = AsyncCamoufox(**opts)
+        self._cm = cm
         if hasattr(cm, "start"):
             self._browser = await cm.start()
         else:
@@ -448,24 +450,44 @@ class HswFarm:
             log(f"  [warm] skip: {e}")
 
     async def _shutdown_unlocked(self) -> None:
+        """
+        Fully tear down Camoufox so Windows Proactor does not print
+        'I/O operation on closed pipe' during GC.
+        """
         for slot in self._pages:
             try:
                 await slot.page.close()
             except Exception:
                 pass
         self._pages.clear()
-        try:
-            if self._browser is not None:
-                if hasattr(self._browser, "stop"):
-                    await self._browser.stop()
-                elif hasattr(self._browser, "close"):
-                    await self._browser.close()
-        except Exception:
-            pass
+
+        browser = self._browser
+        cm = self._cm
         self._browser = None
+        self._cm = None
         self._browser_proxy = None
         self._started = False
         self._free = None
+
+        # Prefer official stop paths in order
+        for closer in (
+            (lambda: browser.stop() if browser is not None and hasattr(browser, "stop") else None),
+            (lambda: browser.close() if browser is not None and hasattr(browser, "close") else None),
+            (lambda: cm.__aexit__(None, None, None) if cm is not None and hasattr(cm, "__aexit__") else None),
+            (lambda: cm.stop() if cm is not None and hasattr(cm, "stop") else None),
+        ):
+            try:
+                coro = closer()
+                if coro is not None:
+                    await coro
+            except Exception:
+                pass
+
+        # Let subprocess pipes drain (Windows asyncio Proactor)
+        try:
+            await asyncio.sleep(0.35)
+        except Exception:
+            pass
 
     async def close(self) -> None:
         async with self._start_lock:
@@ -505,8 +527,17 @@ async def close_hsw_farm() -> None:
     global _hsw_farm
     async with _farm_lock():
         if _hsw_farm is not None:
-            await _hsw_farm.close()
+            try:
+                await _hsw_farm.close()
+            except Exception as e:
+                log(f"  [hsw-farm] close: {e}"[:120])
             _hsw_farm = None
+        # Windows: give event loop a tick so subprocess transports finish
+        if sys.platform == "win32":
+            try:
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
 
 
 async def solve_hsw(req_token: str, proxy_http: str | None) -> str:
