@@ -6,7 +6,7 @@ compatibility_date = "2024-11-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "tts-admin-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "8dc8b8c8-3aab-4d3d-8540-0fc16abf601a"
 
 # Serve admin static UI from Worker
 [assets]
