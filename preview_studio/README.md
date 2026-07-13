@@ -1,26 +1,27 @@
-# HuyViet Preview Studio (tool local)
+# HuyViet Preview Studio (desktop tool)
 
-Clone UI OmniVoice — **không** tts-api server.
+GUI clone OmniVoice — **generate TTS local** (`fast_tts`).
 
-## Login
+## Phân tách rõ
 
-Chỉ **username / password** (không endpoint).
+| | |
+|--|--|
+| **Admin web** | https://tts-origin.liveyt.pro/admin/ — account/API key, gói ký tự, max luồng ≤5, proxyxoay |
+| **Tool desktop** | `PreviewStudio.py` — login user/pass local, chọn file, generate MP3 |
 
-Mặc định lần đầu: `admin` / `admin123` (role admin).
+**Không** quản lý account/proxy/gói trên desktop. Admin chỉ trên web.
 
-## Tab Generate TTS
+## Login tool
 
-- TXT / folder / SRT → chunk → `fast_tts` (HSW preview)
-- Proxy theo account
-- Luồng TTS **tối đa 5** (giới hạn theo gói account)
+Chỉ **username + password** (không endpoint).
 
-## Tab Quản trị (admin only)
+Default: `admin` / `admin123`
 
-| Tab | Chức năng |
-|-----|-----------|
-| **Account** | Tạo/sửa/xóa user, role, gói ký tự, max luồng (1–5), gán proxy |
-| **Proxy** | Pool proxyxoay (host/port/user/pass/api_key) |
-| **Gói ký tự** | 1M / 5M / 10M / 50M… tùy chỉnh |
+## Generate
+
+- Gắn proxy trên account local (⚙) **hoặc** dùng proxy đã cấu hình khi chạy local
+- TXT / folder / SRT → chunk → fast_tts → MP3
+- Max **5 luồng**
 
 ## Chạy
 

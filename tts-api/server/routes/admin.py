@@ -141,9 +141,16 @@ async def put_settings(
 @router.get("/keys")
 async def list_keys(_: str = Depends(require_admin), db: Database = Depends(get_db)):
     rows = await db.list_api_keys()
-    # never return hash
+    # never return hash; keep proxy bind fields for admin UI
     for r in rows:
         r.pop("key_hash", None)
+        # cap display concurrent
+        if r.get("max_concurrent") is not None:
+            try:
+                r["max_concurrent"] = max(1, min(5, int(r["max_concurrent"])))
+            except Exception:
+                pass
+        r["has_proxy"] = bool(r.get("proxy_host") and r.get("proxy_username"))
     return {"keys": rows}
 
 

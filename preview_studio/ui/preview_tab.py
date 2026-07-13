@@ -242,8 +242,9 @@ class PreviewTab(QtWidgets.QWidget):
         sl.addWidget(self.lbl_login_status)
 
         tip = QtWidgets.QLabel(
-            "Tool local: mỗi account gắn 1 line proxyxoay (user/pass/host/port).\n"
-            "TTS chạy fast_tts trên máy — không cần tts-api server."
+            "Tool local generate TTS (fast_tts).\n"
+            "Admin account / gói ký tự / proxy pool → web:\n"
+            "https://tts-origin.liveyt.pro/admin/"
         )
         tip.setObjectName("muted")
         tip.setWordWrap(True)

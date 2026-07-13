@@ -98,8 +98,8 @@ function setNav(page) {
   $$(".nav-btn[data-page]").forEach((b) => b.classList.toggle("active", b.dataset.page === page));
   const titles = {
     overview: ["Overview", "Fleet health, proxies & recent jobs"],
-    keys: ["API Keys", "Create keys, quotas and concurrency limits"],
-    proxies: ["Proxy Pool", "Rotating residential slots"],
+    keys: ["Accounts / API Keys", "Gói ký tự · max luồng (≤5) · gắn proxyxoay"],
+    proxies: ["Proxy Pool", "Proxyxoay rotating lines"],
     settings: ["Settings", "Global defaults for new keys & workers"],
     jobs: ["Jobs", "Queue history and failures"],
     usage: ["Usage", "Daily character & job consumption"],
@@ -203,18 +203,67 @@ async function renderOverview(root) {
   `;
 }
 
+function fmtM(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e6) return (v / 1e6).toFixed(v % 1e6 === 0 ? 0 : 1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(v % 1e3 === 0 ? 0 : 1) + "K";
+  return String(v);
+}
+
+function readProxyFields(prefix) {
+  const host = $(`#${prefix}-phost`)?.value?.trim() || "";
+  const user = $(`#${prefix}-puser`)?.value?.trim() || "";
+  const port = +($(`#${prefix}-pport`)?.value || 0);
+  const body = {};
+  if (host) body.proxy_host = host;
+  if (user) body.proxy_username = user;
+  const pass = $(`#${prefix}-ppass`)?.value;
+  if (pass) body.proxy_password = pass;
+  const key = $(`#${prefix}-pkey`)?.value?.trim();
+  if (key) body.proxy_api_key = key;
+  if (port) body.proxy_port = port;
+  const lab = $(`#${prefix}-plabel`)?.value?.trim();
+  if (lab) body.proxy_label = lab;
+  body.proxy_provider = "proxyxoay_net";
+  return body;
+}
+
 async function renderKeys(root) {
   const data = await api("/keys");
   root.innerHTML = `
     <div class="panel">
-      <h3>Create API key</h3>
+      <h3>Tạo account / API key</h3>
+      <p class="muted">Quản lý tại web admin · gói ký tự (triệu) · max luồng ≤ 5 · gắn proxyxoay riêng</p>
       <div class="grid-2">
-        <div class="field"><label>Name</label><input id="k-name" value="customer" /></div>
-        <div class="field"><label>Max chars / request</label><input id="k-max" type="number" placeholder="default" /></div>
-        <div class="field"><label>Quota chars / day</label><input id="k-qc" type="number" placeholder="default" /></div>
-        <div class="field"><label>Quota jobs / day</label><input id="k-qj" type="number" placeholder="default" /></div>
-        <div class="field"><label>Max concurrent</label><input id="k-mc" type="number" placeholder="default" /></div>
-        <div class="field"><label>Note</label><input id="k-note" placeholder="optional" /></div>
+        <div class="field"><label>Tên account</label><input id="k-name" value="customer" /></div>
+        <div class="field"><label>Max chars / request</label><input id="k-max" type="number" value="950" min="100" max="1000" /></div>
+        <div class="field">
+          <label>Gói ký tự / ngày</label>
+          <select id="k-pkg">
+            <option value="1000000">1 triệu (1,000,000)</option>
+            <option value="5000000">5 triệu</option>
+            <option value="10000000" selected>10 triệu</option>
+            <option value="50000000">50 triệu</option>
+            <option value="100000000">100 triệu</option>
+            <option value="custom">Tuỳ chỉnh…</option>
+          </select>
+        </div>
+        <div class="field"><label>Quota chars (số)</label><input id="k-qc" type="number" value="10000000" min="1000" step="1000000" /></div>
+        <div class="field"><label>Quota jobs / day</label><input id="k-qj" type="number" value="500" /></div>
+        <div class="field">
+          <label>Max luồng đồng thời (1–5)</label>
+          <input id="k-mc" type="number" value="3" min="1" max="5" />
+        </div>
+        <div class="field" style="grid-column:1/-1"><label>Note</label><input id="k-note" placeholder="ghi chú account" /></div>
+      </div>
+      <h4 style="margin:1rem 0 0.5rem">Proxyxoay gắn account này (optional)</h4>
+      <div class="grid-2">
+        <div class="field"><label>Label</label><input id="k-plabel" placeholder="EU line 1" /></div>
+        <div class="field"><label>API key proxyxoay</label><input id="k-pkey" /></div>
+        <div class="field"><label>Username</label><input id="k-puser" /></div>
+        <div class="field"><label>Password</label><input id="k-ppass" type="password" /></div>
+        <div class="field"><label>Host</label><input id="k-phost" placeholder="vipvn7.proxyxoay.net" /></div>
+        <div class="field"><label>Port</label><input id="k-pport" type="number" value="8978" /></div>
       </div>
       <div class="form-actions">
         <button class="primary" id="k-create" type="button">Create key</button>
@@ -222,95 +271,188 @@ async function renderKeys(root) {
       <div id="k-new" class="hidden" style="margin-top:1rem"></div>
     </div>
     <div class="panel">
-      <h3>Keys</h3>
+      <h3>Accounts / Keys</h3>
       <table>
         <thead>
           <tr>
-            <th>Name</th><th>Prefix</th><th>Enabled</th><th>Max chars</th>
-            <th>Quota chars/day</th><th>Used today</th><th>Jobs today</th><th>Total</th><th></th>
+            <th>Name</th><th>Prefix</th><th>On</th>
+            <th>Max/req</th><th>Gói/ngày</th><th>Used</th>
+            <th>Jobs</th><th>Luồng</th><th>Proxy</th><th></th>
           </tr>
         </thead>
         <tbody>
           ${(data.keys || [])
-            .map(
-              (k) => `
+            .map((k) => {
+              const hasPx = !!(k.proxy_host && k.proxy_username);
+              return `
             <tr data-id="${k.id}">
               <td>${esc(k.name)}</td>
               <td class="mono">${esc(k.key_prefix)}</td>
               <td>${k.enabled ? badge("ready") : badge("dead")}</td>
-              <td><input class="k-edit" data-f="max_chars" type="number" value="${k.max_chars ?? ""}" style="width:90px" /></td>
-              <td><input class="k-edit" data-f="quota_chars_day" type="number" value="${k.quota_chars_day ?? ""}" style="width:100px" /></td>
-              <td>${k.chars_used_day}/${k.quota_chars_day}</td>
+              <td><input class="k-edit" data-f="max_chars" type="number" min="100" max="1000" value="${k.max_chars ?? ""}" style="width:80px" /></td>
+              <td>
+                <input class="k-edit" data-f="quota_chars_day" type="number" min="1000" step="1000000"
+                  value="${k.quota_chars_day ?? ""}" style="width:110px" title="${fmtM(k.quota_chars_day)}" />
+                <div class="muted" style="font-size:11px">${fmtM(k.quota_chars_day)}/ngày</div>
+              </td>
+              <td>${fmtM(k.chars_used_day)} / ${fmtM(k.quota_chars_day)}</td>
               <td>${k.jobs_used_day}/${k.quota_jobs_day}</td>
-              <td>${k.total_jobs} jobs / ${k.total_chars}c</td>
-              <td class="row" style="margin:0">
+              <td><input class="k-edit" data-f="max_concurrent" type="number" min="1" max="5" value="${Math.min(5, k.max_concurrent ?? 2)}" style="width:60px" /></td>
+              <td class="mono" style="font-size:11px">${hasPx ? esc((k.proxy_host || "") + ":" + (k.proxy_port || "")) : "—"}</td>
+              <td class="row" style="margin:0;flex-wrap:wrap;gap:4px">
                 <button type="button" data-act="save">Save</button>
+                <button type="button" data-act="proxy">Proxy</button>
                 <button type="button" data-act="toggle">${k.enabled ? "Disable" : "Enable"}</button>
                 <button type="button" class="danger" data-act="del">Delete</button>
               </td>
-            </tr>`
-            )
+            </tr>
+            <tr class="proxy-row hidden" data-proxy-for="${k.id}">
+              <td colspan="10">
+                <div class="grid-2" style="padding:0.5rem 0">
+                  <div class="field"><label>Proxy label</label><input id="kp-${k.id}-plabel" value="${esc(k.proxy_label || "")}" /></div>
+                  <div class="field"><label>Proxyxoay API key</label><input id="kp-${k.id}-pkey" value="${esc(k.proxy_api_key || "")}" /></div>
+                  <div class="field"><label>Username</label><input id="kp-${k.id}-puser" value="${esc(k.proxy_username || "")}" /></div>
+                  <div class="field"><label>Password</label><input id="kp-${k.id}-ppass" type="password" placeholder="(giữ nguyên nếu trống)" /></div>
+                  <div class="field"><label>Host</label><input id="kp-${k.id}-phost" value="${esc(k.proxy_host || "")}" /></div>
+                  <div class="field"><label>Port</label><input id="kp-${k.id}-pport" type="number" value="${k.proxy_port || 8978}" /></div>
+                </div>
+                <button type="button" class="primary" data-act="save-proxy" data-id="${k.id}">Lưu proxy account</button>
+              </td>
+            </tr>`;
+            })
             .join("")}
         </tbody>
       </table>
     </div>
   `;
+
+  const pkg = $("#k-pkg");
+  if (pkg) {
+    pkg.onchange = () => {
+      if (pkg.value !== "custom") $("#k-qc").value = pkg.value;
+    };
+  }
+
   $("#k-create").onclick = async () => {
     try {
+      let mc = +($("#k-mc").value || 3);
+      if (mc < 1) mc = 1;
+      if (mc > 5) mc = 5;
       const body = {
         name: $("#k-name").value || "customer",
         note: $("#k-note").value || "",
+        max_chars: +($("#k-max").value || 950),
+        quota_chars_day: +($("#k-qc").value || 10000000),
+        quota_jobs_day: +($("#k-qj").value || 500),
+        max_concurrent: mc,
+        ...readProxyFields("k"),
       };
-      const max = $("#k-max").value;
-      if (max) body.max_chars = +max;
-      const qc = $("#k-qc").value;
-      if (qc) body.quota_chars_day = +qc;
-      const qj = $("#k-qj").value;
-      if (qj) body.quota_jobs_day = +qj;
-      const mc = $("#k-mc").value;
-      if (mc) body.max_concurrent = +mc;
       const res = await api("/keys", { method: "POST", body: JSON.stringify(body) });
       const box = $("#k-new");
       box.classList.remove("hidden");
       box.style.display = "block";
       box.innerHTML = `<p class="muted">${esc(res.note)}</p><pre class="keybox">${esc(res.key)}</pre>
+        <p class="muted">Gói ${fmtM(body.quota_chars_day)}/ngày · max ${mc} luồng · proxy ${res.has_proxy ? "OK" : "không"}</p>
         <button type="button" id="k-copy">Copy key</button>`;
       $("#k-copy").onclick = () => {
         navigator.clipboard.writeText(res.key);
         toast("Copied");
       };
       toast("API key created");
+      setTimeout(() => navigate("keys"), 800);
     } catch (e) {
       toast(e.message);
     }
   };
+
   root.querySelectorAll("tr[data-id]").forEach((tr) => {
     const id = tr.dataset.id;
-    tr.querySelector('[data-act="save"]').onclick = async () => {
-      const body = {};
-      tr.querySelectorAll(".k-edit").forEach((inp) => {
-        if (inp.value !== "") body[inp.dataset.f] = +inp.value;
-      });
+    const saveBtn = tr.querySelector('[data-act="save"]');
+    if (saveBtn)
+      saveBtn.onclick = async () => {
+        const body = {};
+        tr.querySelectorAll(".k-edit").forEach((inp) => {
+          if (inp.value === "") return;
+          let v = +inp.value;
+          if (inp.dataset.f === "max_concurrent") {
+            if (v < 1) v = 1;
+            if (v > 5) v = 5;
+          }
+          body[inp.dataset.f] = v;
+        });
+        try {
+          await api(`/keys/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+          toast("Saved");
+          navigate("keys");
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+    const pxBtn = tr.querySelector('[data-act="proxy"]');
+    if (pxBtn)
+      pxBtn.onclick = () => {
+        const row = root.querySelector(`tr[data-proxy-for="${id}"]`);
+        if (row) row.classList.toggle("hidden");
+      };
+    const tog = tr.querySelector('[data-act="toggle"]');
+    if (tog)
+      tog.onclick = async () => {
+        const en = tog.textContent === "Enable";
+        try {
+          await api(`/keys/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: en }) });
+          navigate("keys");
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+    const del = tr.querySelector('[data-act="del"]');
+    if (del)
+      del.onclick = async () => {
+        if (!confirm("Delete this key?")) return;
+        try {
+          await api(`/keys/${id}`, { method: "DELETE" });
+          navigate("keys");
+        } catch (e) {
+          toast(e.message);
+        }
+      };
+  });
+
+  root.querySelectorAll('[data-act="save-proxy"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.dataset.id;
+      const body = {
+        proxy_label: $(`#kp-${id}-plabel`)?.value || "",
+        proxy_api_key: $(`#kp-${id}-pkey`)?.value || "",
+        proxy_username: $(`#kp-${id}-puser`)?.value || "",
+        proxy_host: $(`#kp-${id}-phost`)?.value || "",
+        proxy_port: +($(`#kp-${id}-pport`)?.value || 0),
+        proxy_provider: "proxyxoay_net",
+      };
+      const pw = $(`#kp-${id}-ppass`)?.value;
+      if (pw) body.proxy_password = pw;
       try {
         await api(`/keys/${id}`, { method: "PATCH", body: JSON.stringify(body) });
-        toast("Saved");
-      } catch (e) {
-        toast(e.message);
-      }
-    };
-    tr.querySelector('[data-act="toggle"]').onclick = async () => {
-      const en = tr.querySelector('[data-act="toggle"]').textContent === "Enable";
-      try {
-        await api(`/keys/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: en }) });
-        navigate("keys");
-      } catch (e) {
-        toast(e.message);
-      }
-    };
-    tr.querySelector('[data-act="del"]').onclick = async () => {
-      if (!confirm("Delete this key?")) return;
-      try {
-        await api(`/keys/${id}`, { method: "DELETE" });
+        // also upsert pool slot for this account
+        if (body.proxy_host && body.proxy_username) {
+          try {
+            await api("/proxies", {
+              method: "POST",
+              body: JSON.stringify({
+                id: `key${id}`,
+                label: body.proxy_label || `account-${id}`,
+                enabled: true,
+                provider: "proxyxoay_net",
+                api_key: body.proxy_api_key,
+                username: body.proxy_username,
+                password: body.proxy_password || "",
+                host: body.proxy_host,
+                port: body.proxy_port || 8978,
+              }),
+            });
+          } catch (_) {}
+        }
+        toast("Proxy account saved");
         navigate("keys");
       } catch (e) {
         toast(e.message);

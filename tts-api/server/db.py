@@ -255,9 +255,14 @@ class Database:
         sets = []
         vals = []
         for k, v in fields.items():
-            if k in allowed:
-                sets.append(f"{k} = ?")
-                vals.append(v)
+            if k not in allowed:
+                continue
+            if k == "max_concurrent" and v is not None:
+                v = max(1, min(5, int(v)))
+            if k == "proxy_port" and v is not None:
+                v = int(v)
+            sets.append(f"{k} = ?")
+            vals.append(v)
         if not sets:
             return await self.get_api_key(key_id)
         vals.append(key_id)
