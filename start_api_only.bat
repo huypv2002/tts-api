@@ -1,35 +1,31 @@
 @echo off
+setlocal EnableExtensions
 chcp 65001 >nul
-title TTS API only (no Cloudflare Tunnel)
+title TTS API only
 cd /d "%~dp0"
 
 echo ========================================
 echo   TTS API ONLY  (local :8787)
-echo   Khong can cloudflared credential
 echo ========================================
 echo.
 
-set "ROOT=%~dp0"
-set "ROOT=%ROOT:~0,-1%"
+set "ROOT=%CD%"
 set "APP=%ROOT%\tts-api"
 set "VENV_PY=%APP%\.venv\Scripts\python.exe"
 
 if not exist "%APP%\server\main.py" (
-  echo [ERROR] Khong tim thay %APP%\server\main.py
-  pause
-  exit /b 1
+  echo [ERROR] Khong thay %APP%\server\main.py
+  echo Path: %APP%
+  goto :END
 )
 
 if not exist "%VENV_PY%" (
-  echo [ERROR] Chua co venv.
-  echo   powershell -ExecutionPolicy Bypass -File "%ROOT%\bootstrap.ps1"
-  echo   hoac: powershell -ExecutionPolicy Bypass -File "%ROOT%\install_tool.ps1"
-  pause
-  exit /b 1
+  echo [ERROR] Chua co venv: %VENV_PY%
+  echo Chay bootstrap.ps1 hoac install_tool.ps1
+  goto :END
 )
 
 if not exist "%APP%\config\proxies.json" (
-  echo [WARN] Copy proxies.example.json -^> proxies.json
   copy /Y "%APP%\config\proxies.example.json" "%APP%\config\proxies.json" >nul
 )
 
@@ -41,20 +37,20 @@ if not exist "%APP%\.env" (
   ) > "%APP%\.env"
 )
 
-set "PYTHONPATH=%APP%;%ROOT%"
-set "TTS_PORT=8787"
+if not exist "%APP%\run_api_window.bat" (
+  echo [ERROR] Thieu run_api_window.bat - git pull
+  goto :END
+)
 
-echo [0/1] Pin playwright ...
-"%VENV_PY%" -m pip install "playwright>=1.48.0,<1.61.0" -q
+echo Mo cua so API (giu mo)...
+start "TTS-API-Server" /D "%APP%" cmd /k call run_api_window.bat
 
-echo [1/1] Start API http://0.0.0.0:8787 ...
 echo.
-echo  Admin local: http://127.0.0.1:8787/admin/
-echo  Health:      http://127.0.0.1:8787/v1/health
-echo  Ctrl+C de tat.
+echo Admin: http://127.0.0.1:8787/admin/
+echo Health: http://127.0.0.1:8787/v1/health
 echo.
 
-cd /d "%APP%"
-set PYTHONPATH=%APP%;%ROOT%
-"%VENV_PY%" -m uvicorn server.main:app --host 0.0.0.0 --port 8787
-pause
+:END
+echo Nhan phim bat ky de dong...
+pause >nul
+endlocal
