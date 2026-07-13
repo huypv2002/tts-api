@@ -37,13 +37,20 @@ if not exist "%APP%\config\proxies.json" (
   copy /Y "%APP%\config\proxies.example.json" "%APP%\config\proxies.json" >nul
 )
 
+REM Always ensure admin password in .env (env overrides settings.json)
 if not exist "%APP%\.env" (
   (
     echo TTS_ADMIN_PASSWORD=30102002
     echo TTS_PORT=8787
     echo TTS_PUBLIC_BASE_URL=https://tts-origin.liveyt.pro
   ) > "%APP%\.env"
+) else (
+  findstr /B /C:"TTS_ADMIN_PASSWORD=" "%APP%\.env" >nul 2>&1
+  if errorlevel 1 (
+    echo TTS_ADMIN_PASSWORD=30102002>> "%APP%\.env"
+  )
 )
+set "TTS_ADMIN_PASSWORD=30102002"
 
 REM === Tunnel credential BAT BUOC (nhu ban dau) ===
 if not exist "%USERPROFILE%\.cloudflared" mkdir "%USERPROFILE%\.cloudflared"

@@ -19,6 +19,7 @@ if not exist "%VENV_PY%" (
 
 set "PYTHONPATH=%APP%;%ROOT%"
 set "TTS_PORT=8787"
+if "%TTS_ADMIN_PASSWORD%"=="" set "TTS_ADMIN_PASSWORD=30102002"
 if "%TTS_PUBLIC_BASE_URL%"=="" set "TTS_PUBLIC_BASE_URL=https://tts-origin.liveyt.pro"
 
 echo ========================================

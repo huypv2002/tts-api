@@ -47,10 +47,12 @@ def load_settings() -> dict:
     base = _read_json(SETTINGS_EXAMPLE, {})
     cur = _read_json(SETTINGS_PATH, {})
     merged = {**base, **cur}
-    # Env fills gaps only — settings.json (admin UI) wins over .env for password
-    if not (cur.get("admin_password") or "").strip():
-        if os.environ.get("TTS_ADMIN_PASSWORD"):
-            merged["admin_password"] = os.environ["TTS_ADMIN_PASSWORD"]
+    # Ops: TTS_ADMIN_PASSWORD in .env always wins (easy reset on Windows without UI)
+    env_pw = (os.environ.get("TTS_ADMIN_PASSWORD") or "").strip()
+    if env_pw:
+        merged["admin_password"] = env_pw
+    elif not (cur.get("admin_password") or "").strip():
+        merged["admin_password"] = "admin123"
     if not (cur.get("admin_session_secret") or "").strip():
         if os.environ.get("TTS_ADMIN_SECRET"):
             merged["admin_session_secret"] = os.environ["TTS_ADMIN_SECRET"]

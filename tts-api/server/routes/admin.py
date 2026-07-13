@@ -40,7 +40,9 @@ async def require_admin(
 @router.post("/login")
 async def login(body: AdminLogin, request: Request, db: Database = Depends(get_db)):
     settings = load_settings()
-    if body.password != settings.get("admin_password"):
+    expected = (settings.get("admin_password") or "").strip()
+    got = (body.password or "").strip()
+    if not expected or got != expected:
         raise HTTPException(401, "wrong password")
     token = secrets.token_urlsafe(32)
     await db.create_session(token)
