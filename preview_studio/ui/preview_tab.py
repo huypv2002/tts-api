@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Main tab — UI clone OmniVoiceTab, engine = tts-api preview (no Omni)."""
+"""Main tab — UI clone OmniVoice, engine = local fast_tts (no server)."""
 from __future__ import annotations
 
 import os
@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QHeaderView
 
-from client.tts_api_client import TtsApiClient
+import accounts_store as accounts
+from local_tts import synthesize_one_sync
 
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
 DEFAULT_MODEL = "eleven_v3"
@@ -43,28 +44,30 @@ def split_chunks(text: str, max_chars: int) -> List[str]:
 class BatchWorker(QThread):
     log = Signal(str)
     row_started = Signal(int)
-    row_done = Signal(int, bool, str, str)  # row, ok, path, err
+    row_done = Signal(int, bool, str, str)
     file_progress = Signal(int, int, int)
-    finished = Signal(int, int)  # ok, fail
+    finished = Signal(int, int)
 
     def __init__(
         self,
-        client: TtsApiClient,
         chunks: List[dict],
         output_dir: str,
+        proxy: Optional[str],
         voice: str,
         lang: str,
         model: str,
         workers: int = 2,
+        hsw_workers: int = 2,
     ):
         super().__init__()
-        self.client = client
         self.chunks = chunks
         self.output_dir = output_dir
+        self.proxy = proxy
         self.voice = voice
         self.lang = lang
         self.model = model
         self.workers = max(1, min(6, int(workers or 1)))
+        self.hsw_workers = max(1, min(4, int(hsw_workers or 2)))
         self._stop = False
 
     def stop(self):
@@ -84,17 +87,20 @@ class BatchWorker(QThread):
                 self.output_dir, f"{row+1:04d}_{src}_{len(text)}c.mp3"
             )
             try:
-                self.client.synthesize_to_file(
+                synthesize_one_sync(
                     text=text,
                     out_path=out,
+                    proxy=self.proxy,
+                    voice=self.voice,
+                    model=self.model,
                     lang=self.lang,
-                    voice=self.voice or None,
-                    model=self.model or None,
+                    hsw_workers=self.hsw_workers,
                 )
                 return row, True, out, ""
             except Exception as e:
-                return row, False, "", str(e)[:200]
+                return row, False, "", str(e)[:240]
 
+        # Serial-ish: each synthesize uses shared farm; multi workers still ok with farm lock
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
             futs = {
                 ex.submit(one, i, self.chunks[i]): i for i in range(len(self.chunks))
@@ -121,15 +127,13 @@ class PreviewTab(QtWidgets.QWidget):
     def __init__(
         self,
         main_window,
-        client: TtsApiClient,
         user: dict,
         load_config: Callable,
         save_config: Callable,
     ):
         super().__init__()
         self.main_window = main_window
-        self.client = client
-        self.user = user
+        self.user = user  # full account row with proxy secrets
         self.load_config = load_config
         self.save_config = save_config
         self._cfg = load_config()
@@ -221,52 +225,35 @@ class PreviewTab(QtWidgets.QWidget):
             layout.addWidget(label)
             return frame, layout
 
-        # ── Settings dialog ──
+        # Settings dialog — account + proxyxoay (local)
         self.settings_dialog = QtWidgets.QDialog(self)
         self.settings_dialog.setWindowTitle("Cài đặt · Account + Proxyxoay")
         self.settings_dialog.setModal(False)
-        self.settings_dialog.resize(480, 520)
+        self.settings_dialog.resize(480, 480)
         sl = QtWidgets.QVBoxLayout(self.settings_dialog)
         sl.setContentsMargins(16, 14, 16, 14)
         sl.setSpacing(8)
 
-        t1 = QtWidgets.QLabel("Tài khoản tts-api")
+        t1 = QtWidgets.QLabel("Account local")
         t1.setObjectName("cardTitle")
         sl.addWidget(t1)
         self.lbl_login_status = QtWidgets.QLabel("—")
         self.lbl_login_status.setObjectName("badge")
         sl.addWidget(self.lbl_login_status)
 
-        sl.addWidget(QtWidgets.QLabel("Server URL"))
-        self.ed_base = QtWidgets.QLineEdit()
-        sl.addWidget(self.ed_base)
-        sl.addWidget(QtWidgets.QLabel("API Key (account)"))
-        self.ed_api_key = QtWidgets.QLineEdit()
-        self.ed_api_key.setEchoMode(QtWidgets.QLineEdit.Password)
-        sl.addWidget(self.ed_api_key)
-
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.HLine)
-        sl.addWidget(sep)
-
-        t2 = QtWidgets.QLabel("Gắn Proxyxoay cho account (admin)")
-        t2.setObjectName("cardTitle")
-        sl.addWidget(t2)
         tip = QtWidgets.QLabel(
-            "Dùng admin password để ghi proxy vào API key trên server.\n"
-            "Worker sẽ ưu tiên proxy riêng của key này."
+            "Tool local: mỗi account gắn 1 line proxyxoay (user/pass/host/port).\n"
+            "TTS chạy fast_tts trên máy — không cần tts-api server."
         )
         tip.setObjectName("muted")
         tip.setWordWrap(True)
         sl.addWidget(tip)
 
-        self.ed_admin_pw = QtWidgets.QLineEdit()
-        self.ed_admin_pw.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.ed_admin_pw.setPlaceholderText("Admin password tts-api")
-        sl.addWidget(self.ed_admin_pw)
-
+        t2 = QtWidgets.QLabel("Proxyxoay gắn account này")
+        t2.setObjectName("cardTitle")
+        sl.addWidget(t2)
         self.ed_px_key = QtWidgets.QLineEdit()
-        self.ed_px_key.setPlaceholderText("Proxyxoay API key")
+        self.ed_px_key.setPlaceholderText("Proxyxoay API key (để change-ip, tuỳ chọn)")
         sl.addWidget(self.ed_px_key)
         row_u = QtWidgets.QHBoxLayout()
         self.ed_px_user = QtWidgets.QLineEdit()
@@ -287,39 +274,34 @@ class PreviewTab(QtWidgets.QWidget):
         row_h.addWidget(self.ed_px_port, 1)
         sl.addLayout(row_h)
         self.ed_px_label = QtWidgets.QLineEdit()
-        self.ed_px_label.setPlaceholderText("Nhãn proxy (tuỳ chọn)")
+        self.ed_px_label.setPlaceholderText("Nhãn (tuỳ chọn)")
         sl.addWidget(self.ed_px_label)
 
-        btn_row = QtWidgets.QHBoxLayout()
-        self.bt_save_account = QtWidgets.QPushButton("Lưu account + proxy")
-        self.bt_save_account.setObjectName("primaryButton")
-        self.bt_test_me = QtWidgets.QPushButton("Test /me")
-        btn_row.addWidget(self.bt_save_account)
-        btn_row.addWidget(self.bt_test_me)
-        sl.addLayout(btn_row)
+        self.bt_save_proxy = QtWidgets.QPushButton("Lưu proxy cho account")
+        self.bt_save_proxy.setObjectName("primaryButton")
+        sl.addWidget(self.bt_save_proxy)
         self.lbl_settings_msg = QtWidgets.QLabel("")
         self.lbl_settings_msg.setObjectName("muted")
         self.lbl_settings_msg.setWordWrap(True)
         sl.addWidget(self.lbl_settings_msg)
         sl.addStretch(1)
 
-        # ── Main layout ──
         content = QtWidgets.QHBoxLayout()
         left = QtWidgets.QVBoxLayout()
         left.setSpacing(10)
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(10)
 
-        voice_card, voice_l = card("Giọng nói · Preview ElevenLabs")
+        voice_card, voice_l = card("Giọng nói · Preview local")
         top_bar = QtWidgets.QHBoxLayout()
-        badge = QtWidgets.QLabel("Preview TTS (tts-api)")
+        badge = QtWidgets.QLabel("fast_tts · HSW preview")
         badge.setObjectName("badge")
         top_bar.addWidget(badge)
         top_bar.addStretch(1)
         self.bt_settings = QtWidgets.QToolButton()
         self.bt_settings.setObjectName("settingsButton")
         self.bt_settings.setText("⚙")
-        self.bt_settings.setToolTip("Cài đặt account / proxyxoay")
+        self.bt_settings.setToolTip("Proxyxoay / account")
         top_bar.addWidget(self.bt_settings)
         voice_l.addLayout(top_bar)
 
@@ -327,7 +309,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.ed_voice_id.setPlaceholderText("Voice ID")
         self.ed_voice_id.setText(DEFAULT_VOICE)
         self.ed_lang = QtWidgets.QLineEdit()
-        self.ed_lang.setPlaceholderText("lang (en/vi/...)")
+        self.ed_lang.setPlaceholderText("lang")
         self.ed_lang.setText("en")
         self.ed_lang.setMaximumWidth(80)
         vr = QtWidgets.QHBoxLayout()
@@ -360,12 +342,17 @@ class PreviewTab(QtWidgets.QWidget):
         self.sb_max_chars.setValue(900)
         opt.addWidget(self.sb_max_chars)
         opt.addWidget(QtWidgets.QLabel("ký tự"))
-        opt.addSpacing(10)
-        opt.addWidget(QtWidgets.QLabel("Luồng"))
+        opt.addSpacing(8)
+        opt.addWidget(QtWidgets.QLabel("Luồng TTS"))
         self.sb_workers = QtWidgets.QSpinBox()
         self.sb_workers.setRange(1, 6)
         self.sb_workers.setValue(2)
         opt.addWidget(self.sb_workers)
+        opt.addWidget(QtWidgets.QLabel("HSW"))
+        self.sb_hsw = QtWidgets.QSpinBox()
+        self.sb_hsw.setRange(1, 4)
+        self.sb_hsw.setValue(2)
+        opt.addWidget(self.sb_hsw)
         opt.addStretch(1)
         self.lbl_chunk_summary = QtWidgets.QLabel("0 đoạn / 0 chunk")
         self.lbl_chunk_summary.setObjectName("badge")
@@ -401,7 +388,6 @@ class PreviewTab(QtWidgets.QWidget):
         out_l.addLayout(run)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setValue(0)
         out_l.addWidget(self.progress)
         left.addWidget(out_card)
 
@@ -426,7 +412,7 @@ class PreviewTab(QtWidgets.QWidget):
         chunks_card, chunks_l = card("Danh sách đoạn")
         self.tbl_sub = QtWidgets.QTableWidget(0, 6)
         self.tbl_sub.setHorizontalHeaderLabels(
-            ["STT", "Tệp", "Thời lượng", "Ký tự", "Nội dung", "Trạng thái"]
+            ["STT", "Tệp", "Size", "Ký tự", "Nội dung", "Trạng thái"]
         )
         self.tbl_sub.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_sub.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -453,8 +439,7 @@ class PreviewTab(QtWidgets.QWidget):
 
         self.bt_stop.setEnabled(False)
         self.bt_settings.clicked.connect(self._open_settings)
-        self.bt_save_account.clicked.connect(self._save_account_proxy)
-        self.bt_test_me.clicked.connect(self._test_me)
+        self.bt_save_proxy.clicked.connect(self._save_proxy)
         self.bt_txt.clicked.connect(self._pick_txt)
         self.bt_folder.clicked.connect(self._pick_folder)
         self.bt_srt.clicked.connect(self._pick_srt)
@@ -467,146 +452,72 @@ class PreviewTab(QtWidgets.QWidget):
 
     def _load_cfg(self):
         c = self._cfg
-        self.ed_base.setText(c.get("base_url") or self.client.base_url)
-        self.ed_api_key.setText(c.get("api_key") or self.client.api_key)
         self.ed_output_dir.setText(
-            c.get("output_dir")
-            or os.path.join(os.path.dirname(__file__), "..", "output")
+            c.get("output_dir") or os.path.join(os.path.dirname(__file__), "..", "output")
         )
         self.sb_max_chars.setValue(int(c.get("max_chars") or 900))
         self.sb_workers.setValue(int(c.get("workers") or 2))
+        self.sb_hsw.setValue(int(c.get("hsw_workers") or 2))
         self.ed_voice_id.setText(c.get("voice_id") or DEFAULT_VOICE)
         self.ed_lang.setText(c.get("lang") or "en")
-        self.ed_admin_pw.setText(c.get("admin_password") or "")
-        self.ed_px_key.setText(c.get("proxy_api_key") or "")
-        self.ed_px_user.setText(c.get("proxy_username") or "")
-        self.ed_px_pass.setText(c.get("proxy_password") or "")
-        self.ed_px_host.setText(c.get("proxy_host") or "")
-        if c.get("proxy_port"):
-            self.ed_px_port.setValue(int(c["proxy_port"]))
-        self.ed_px_label.setText(c.get("proxy_label") or "")
+        # proxy from account
+        self.ed_px_key.setText(self.user.get("proxy_api_key") or "")
+        self.ed_px_user.setText(self.user.get("proxy_username") or "")
+        self.ed_px_pass.setText(self.user.get("proxy_password") or "")
+        self.ed_px_host.setText(self.user.get("proxy_host") or "")
+        if self.user.get("proxy_port"):
+            self.ed_px_port.setValue(int(self.user["proxy_port"]))
+        self.ed_px_label.setText(self.user.get("proxy_label") or "")
 
     def _persist_cfg(self):
         c = self.load_config()
         c.update(
             {
-                "base_url": self.ed_base.text().strip(),
-                "api_key": self.ed_api_key.text().strip(),
                 "output_dir": self.ed_output_dir.text().strip(),
                 "max_chars": self.sb_max_chars.value(),
                 "workers": self.sb_workers.value(),
+                "hsw_workers": self.sb_hsw.value(),
                 "voice_id": self.ed_voice_id.text().strip(),
                 "lang": self.ed_lang.text().strip() or "en",
-                "admin_password": self.ed_admin_pw.text(),
-                "proxy_api_key": self.ed_px_key.text().strip(),
-                "proxy_username": self.ed_px_user.text().strip(),
-                "proxy_password": self.ed_px_pass.text(),
-                "proxy_host": self.ed_px_host.text().strip(),
-                "proxy_port": self.ed_px_port.value(),
-                "proxy_label": self.ed_px_label.text().strip(),
             }
         )
         self.save_config(c)
         self._cfg = c
 
     def _refresh_account_badge(self):
-        me = self.user.get("me") or {}
-        name = me.get("name") or self.user.get("username")
-        px = "có proxy" if me.get("has_proxy") else "chưa gắn proxy"
-        self.lbl_login_status.setText(f"Account: {name} · {px}")
-        self.lbl_account.setText(
-            f"Logged in · {name} · max_chars={me.get('max_chars')} · "
-            f"quota_jobs={me.get('jobs_used_day')}/{me.get('quota_jobs_day')} · {px}"
-        )
+        u = self.user.get("username") or "?"
+        px = "có proxy" if accounts.build_proxy_url(self.user) else "CHƯA gắn proxy"
+        host = self.user.get("proxy_host") or "—"
+        self.lbl_login_status.setText(f"Account: {u} · {px}")
+        self.lbl_account.setText(f"Local · {u} · proxy={host} · {px}")
 
     def _open_settings(self):
         self.settings_dialog.show()
         self.settings_dialog.raise_()
 
-    def _test_me(self):
+    def _save_proxy(self):
         try:
-            self.client.base_url = self.ed_base.text().strip().rstrip("/")
-            self.client.api_key = self.ed_api_key.text().strip()
-            me = self.client.me()
-            self.user["me"] = me
-            self._refresh_account_badge()
-            self.lbl_settings_msg.setText(f"OK /me: {me}")
-        except Exception as e:
-            self.lbl_settings_msg.setText(f"Lỗi: {e}")
-
-    def _save_account_proxy(self):
-        """Admin login + PATCH api key with proxyxoay binding."""
-        self._persist_cfg()
-        base = self.ed_base.text().strip().rstrip("/")
-        api_key = self.ed_api_key.text().strip()
-        admin_pw = self.ed_admin_pw.text().strip()
-        if not admin_pw:
-            self.lbl_settings_msg.setText("Cần admin password để gắn proxy lên server.")
-            return
-        try:
-            admin = TtsApiClient(base)
-            admin.admin_login(admin_pw)
-            keys = admin.list_keys()
-            # find key by matching prefix of our api_key
-            target = None
-            for k in keys:
-                pref = (k.get("key_prefix") or "").replace("…", "").replace("...", "")
-                if api_key.startswith(pref.rstrip("…")) or pref in api_key:
-                    target = k
-                    break
-            # fallback: match by me id
-            if not target and self.user.get("id"):
-                for k in keys:
-                    if k.get("id") == self.user.get("id"):
-                        target = k
-                        break
-            if not target:
-                self.lbl_settings_msg.setText(
-                    "Không tìm thấy API key trên server (admin). "
-                    "Kiểm tra key / admin password."
-                )
-                return
-            body = {
-                "proxy_provider": "proxyxoay_net",
-                "proxy_api_key": self.ed_px_key.text().strip(),
-                "proxy_username": self.ed_px_user.text().strip(),
-                "proxy_password": self.ed_px_pass.text(),
-                "proxy_host": self.ed_px_host.text().strip(),
-                "proxy_port": self.ed_px_port.value(),
-                "proxy_label": self.ed_px_label.text().strip()
-                or f"px-{target.get('name')}",
-            }
-            # also upsert into global pool for redundancy
-            if body["proxy_host"] and body["proxy_username"]:
-                try:
-                    admin.upsert_proxy(
-                        {
-                            "id": f"key{target['id']}",
-                            "label": body["proxy_label"],
-                            "enabled": True,
-                            "provider": "proxyxoay_net",
-                            "api_key": body["proxy_api_key"],
-                            "username": body["proxy_username"],
-                            "password": body["proxy_password"],
-                            "host": body["proxy_host"],
-                            "port": body["proxy_port"],
-                        }
-                    )
-                except Exception as e:
-                    self.lbl_settings_msg.setText(f"Pool upsert warn: {e}")
-
-            updated = admin.patch_key(int(target["id"]), **body)
-            self.client.base_url = base
-            self.client.api_key = api_key
-            me = self.client.me()
-            self.user["me"] = me
+            updated = accounts.update_account(
+                self.user["id"],
+                proxy_provider="proxyxoay_net",
+                proxy_api_key=self.ed_px_key.text().strip(),
+                proxy_username=self.ed_px_user.text().strip(),
+                proxy_password=self.ed_px_pass.text(),
+                proxy_host=self.ed_px_host.text().strip(),
+                proxy_port=self.ed_px_port.value(),
+                proxy_label=self.ed_px_label.text().strip(),
+            )
+            # refresh session user secrets
+            full = accounts.get_account(self.user["id"])
+            if full:
+                self.user = full
             self._refresh_account_badge()
             self.lbl_settings_msg.setText(
-                f"✅ Đã gắn proxy cho key id={target['id']} "
-                f"host={updated.get('proxy_host')} port={updated.get('proxy_port')}"
+                f"✅ Đã lưu proxy cho account '{self.user.get('username')}' "
+                f"→ {self.user.get('proxy_host')}:{self.user.get('proxy_port')}"
             )
         except Exception as e:
-            self.lbl_settings_msg.setText(f"Lỗi lưu: {e}\n{traceback.format_exc()[:200]}")
+            self.lbl_settings_msg.setText(f"Lỗi: {e}")
 
     def _set_status(self, text: str):
         self._status.setText(text)
@@ -621,11 +532,7 @@ class PreviewTab(QtWidgets.QWidget):
     def _pick_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Chọn thư mục TXT")
         if d:
-            paths = sorted(
-                str(p)
-                for p in Path(d).rglob("*.txt")
-                if p.is_file()
-            )
+            paths = sorted(str(p) for p in Path(d).rglob("*.txt") if p.is_file())
             self._load_paths(paths, "folder")
 
     def _pick_srt(self):
@@ -672,20 +579,11 @@ class PreviewTab(QtWidgets.QWidget):
         max_c = self.sb_max_chars.value()
         self._chunks = []
         for s in self._sources:
-            parts = split_chunks(s["text"], max_c)
-            for i, t in enumerate(parts):
-                self._chunks.append(
-                    {
-                        "file": s["file"],
-                        "part": i + 1,
-                        "text": t,
-                        "path": None,
-                    }
-                )
+            for i, t in enumerate(split_chunks(s["text"], max_c)):
+                self._chunks.append({"file": s["file"], "part": i + 1, "text": t, "path": None})
         self.lbl_chunk_summary.setText(
             f"{len(self._sources)} đoạn / {len(self._chunks)} chunk"
         )
-        self.tbl_sub.setRowCount(0)
         self.tbl_sub.setRowCount(len(self._chunks))
         for i, ch in enumerate(self._chunks):
             self.tbl_sub.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
@@ -698,7 +596,6 @@ class PreviewTab(QtWidgets.QWidget):
         self._persist_cfg()
 
     def _rebuild_queue_table(self):
-        self.tbl_queue.setRowCount(0)
         self.tbl_queue.setRowCount(len(self._sources))
         for i, s in enumerate(self._sources):
             self.tbl_queue.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
@@ -716,13 +613,19 @@ class PreviewTab(QtWidgets.QWidget):
         if not self._chunks:
             self._set_status("Chưa có chunk — chọn file trước.")
             return
+        proxy = accounts.build_proxy_url(self.user)
+        if not proxy:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Thiếu proxy",
+                "Account chưa gắn proxyxoay.\nVào ⚙ Cài đặt → điền host/user/pass → Lưu.",
+            )
+            return
         self._persist_cfg()
         out = self.ed_output_dir.text().strip()
         if not out:
             self._set_status("Chọn thư mục xuất.")
             return
-        self.client.base_url = self.ed_base.text().strip().rstrip("/") or self.client.base_url
-        self.client.api_key = self.ed_api_key.text().strip() or self.client.api_key
         self.bt_start.setEnabled(False)
         self.bt_stop.setEnabled(True)
         self.progress.setValue(0)
@@ -730,13 +633,14 @@ class PreviewTab(QtWidgets.QWidget):
         for i in range(self.tbl_sub.rowCount()):
             self.tbl_sub.setItem(i, 5, QtWidgets.QTableWidgetItem("chờ"))
         self._batch = BatchWorker(
-            client=self.client,
             chunks=self._chunks,
             output_dir=out,
+            proxy=proxy,
             voice=self.ed_voice_id.text().strip() or DEFAULT_VOICE,
             lang=self.ed_lang.text().strip() or "en",
             model=DEFAULT_MODEL,
             workers=self.sb_workers.value(),
+            hsw_workers=self.sb_hsw.value(),
         )
         self._batch.log.connect(self._set_status)
         self._batch.row_started.connect(self._on_row_started)
@@ -744,7 +648,10 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch.file_progress.connect(self._on_progress)
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
-        self._set_status(f"Đang generate {len(self._chunks)} chunk…")
+        self._set_status(
+            f"Đang generate {len(self._chunks)} chunk qua proxy "
+            f"{self.user.get('proxy_host')}…"
+        )
 
     def _stop(self):
         if self._batch:
@@ -752,9 +659,7 @@ class PreviewTab(QtWidgets.QWidget):
             self._set_status("Đang dừng…")
 
     def _on_row_started(self, row: int):
-        item = QtWidgets.QTableWidgetItem("chạy")
-        item.setForeground(QtGui.QColor("#171717"))
-        self.tbl_sub.setItem(row, 5, item)
+        self.tbl_sub.setItem(row, 5, QtWidgets.QTableWidgetItem("chạy"))
 
     def _on_row_done(self, row: int, ok: bool, path: str, err: str):
         if ok:
@@ -764,9 +669,8 @@ class PreviewTab(QtWidgets.QWidget):
             self.tbl_sub.setItem(row, 5, item)
             if path and os.path.exists(path):
                 try:
-                    sz = os.path.getsize(path)
                     self.tbl_sub.setItem(
-                        row, 2, QtWidgets.QTableWidgetItem(f"{sz//1024}KB")
+                        row, 2, QtWidgets.QTableWidgetItem(f"{os.path.getsize(path)//1024}KB")
                     )
                 except Exception:
                     pass
@@ -777,8 +681,7 @@ class PreviewTab(QtWidgets.QWidget):
             self.tbl_sub.setItem(row, 5, item)
 
     def _on_progress(self, _fi: int, cur: int, total: int):
-        pct = int(100 * cur / max(1, total))
-        self.progress.setValue(pct)
+        self.progress.setValue(int(100 * cur / max(1, total)))
         self.lbl_result.setText(f"Kết quả: {cur}/{total}")
 
     def _on_finished(self, ok: int, fail: int):
@@ -802,4 +705,4 @@ class PreviewTab(QtWidgets.QWidget):
     def cleanup(self):
         if self._batch:
             self._batch.stop()
-            self._batch.wait(3000)
+            self._batch.wait(5000)

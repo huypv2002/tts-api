@@ -1,49 +1,34 @@
-# HuyViet Preview Studio
+# HuyViet Preview Studio (TOOL local)
 
-Clone UI **OmniVoiceOnly** (PySide6), backend **tts-api** (không Omni/Colab).
-
-## Tính năng
+Clone UI **OmniVoiceOnly**, **không** dùng tts-api server.
 
 | | |
 |--|--|
-| Login | API Key `tts_…` + Server URL |
-| Generate | Batch TXT / folder / SRT → chunk → `POST /v1/tts` → MP3 |
-| Settings | Gắn **proxyxoay** cho account (API key) qua admin |
-| Voice | Voice ID ElevenLabs preview (default server) |
+| Login | Account local (`accounts.json`) |
+| Proxy | Gắn **proxyxoay** theo từng account |
+| TTS | `fast_tts` (HSW + anonymous preview) trên máy |
+| Omni | Đã bỏ |
 
-## Cài
-
-```bash
-cd preview_studio
-pip install -r requirements.txt
-# cần tts-api đang chạy (Windows + tunnel hoặc local)
-python PreviewStudio.py
-```
-
-## Luồng gắn proxy cho account
-
-1. Admin tạo API key trên server (hoặc bootstrap key).
-2. Mở ⚙ **Cài đặt** trong app.
-3. Điền:
-   - Admin password (`30102002` hoặc password server)
-   - Proxyxoay: api_key / user / pass / host / port
-4. **Lưu account + proxy** → server `PATCH /admin/api/keys/{id}`  
-   Worker ưu tiên proxy riêng của key; fallback pool chung.
-
-## Server cần
+## Chạy
 
 ```bash
-cd C:\TTS\tts-api
-git pull
-# restart start_all.bat  (có migration cột proxy_* trên api_keys)
+cd /Users/phamvanhuy/Downloads/tts-preview/preview_studio
+pip3 install -r requirements.txt
+# cần camoufox + tls-client (đã có nếu từng chạy fast_tts)
+python3 PreviewStudio.py
 ```
 
-## File
+Lần đầu: user `admin` / pass `admin123` (đổi sau trong account).
 
-```
-preview_studio/
-  PreviewStudio.py      # entry (login + main window)
-  ui/preview_tab.py     # UI clone OmniVoice tab
-  client/tts_api_client.py
-  requirements.txt
-```
+## Gắn proxyxoay
+
+1. ⚙ Cài đặt  
+2. Điền host / port / user / pass (và api_key nếu có)  
+3. **Lưu proxy cho account**  
+4. Chọn TXT → Bắt đầu  
+
+MP3 → thư mục `preview_studio/output/` (hoặc path bạn chọn).
+
+## Phụ thuộc repo
+
+Cần `fast_tts.py` ở thư mục cha (`tts-preview/`).

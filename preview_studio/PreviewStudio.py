@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Preview Studio — clone UI OmniVoiceOnly, backend = tts-api.
+Preview Studio — clone UI OmniVoiceOnly (tool local).
 
-- Login bằng API Key (account tts-api)
-- Settings: server URL, gắn proxyxoay cho account (admin)
-- Generate batch preview TTS (không Omni/Colab)
+- Login account local (accounts.json)
+- Gắn proxyxoay cho từng account
+- Generate batch bằng fast_tts (HSW + preview anonymous) — KHÔNG tts-api server
+- Bỏ Omni / Colab
 """
 from __future__ import annotations
 
@@ -13,16 +14,14 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-# allow import from this package
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-from client.tts_api_client import TtsApiClient  # noqa: E402
+import accounts_store as accounts  # noqa: E402
 from ui.preview_tab import PreviewTab  # noqa: E402
 
 APP_NAME = "HuyViet Preview Studio"
@@ -38,12 +37,10 @@ def load_config() -> dict:
     except Exception:
         pass
     return {
-        "base_url": "https://tts-origin.liveyt.pro",
-        "api_key": "",
-        "admin_password": "",
         "output_dir": os.path.join(_APP_DIR, "output"),
         "max_chars": 900,
         "workers": 2,
+        "hsw_workers": 2,
         "voice_id": "NOpBlnGInO9m6vDvFkFC",
         "lang": "en",
     }
@@ -70,45 +67,30 @@ def _load_login_temp() -> dict:
                     password = encoded
             else:
                 password = ""
-            return {
-                "username": data.get("username", ""),
-                "password": password,
-                "base_url": data.get("base_url", ""),
-            }
+            return {"username": data.get("username", ""), "password": password}
     except Exception as exc:
         print(f"login temp: {exc}")
-    return {"username": "", "password": "", "base_url": ""}
+    return {"username": "", "password": ""}
 
 
-def _save_login_temp(username: str, password: str, base_url: str) -> None:
+def _save_login_temp(username: str, password: str) -> None:
     try:
         encoded = base64.b64encode(password.encode("utf-8")).decode("utf-8")
         with open(LOGIN_TEMP_FILE, "w", encoding="utf-8") as file:
-            json.dump(
-                {
-                    "username": username,
-                    "password": encoded,
-                    "base_url": base_url,
-                },
-                file,
-                indent=2,
-            )
+            json.dump({"username": username, "password": encoded}, file, indent=2)
     except Exception as exc:
         print(f"login temp save: {exc}")
 
 
 class LoginDialog(QtWidgets.QDialog):
-    """Clone visual style OmniVoiceOnly LoginDialog — auth = tts-api API key."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
+        accounts.ensure_default_account()
         saved = _load_login_temp()
-        cfg = load_config()
         self.user = None
-        self.client: TtsApiClient | None = None
         self.setWindowTitle("HuyViet Preview Studio - Đăng nhập")
         self.setModal(True)
-        self.setFixedSize(450, 540)
+        self.setFixedSize(450, 520)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint)
         self.setStyleSheet(
             """
@@ -117,30 +99,14 @@ class LoginDialog(QtWidgets.QDialog):
                 border-radius: 12px;
                 border: 1px solid #cfcfcf;
             }
-            QLabel {
-                color: #171717;
-                font-size: 13px;
-                background: transparent;
-            }
+            QLabel { color: #171717; font-size: 13px; background: transparent; }
             QLineEdit {
-                background-color: #ffffff;
-                border: 1px solid #c9c9c9;
-                border-radius: 7px;
-                padding: 14px 18px;
-                color: #171717;
-                font-size: 14px;
-                selection-background-color: #171717;
-                selection-color: #ffffff;
+                background-color: #ffffff; border: 1px solid #c9c9c9;
+                border-radius: 7px; padding: 14px 18px; color: #171717; font-size: 14px;
             }
-            QLineEdit:focus {
-                border: 1px solid #171717;
-                background-color: #ffffff;
-            }
+            QLineEdit:focus { border: 1px solid #171717; }
             QPushButton {
-                border-radius: 7px;
-                padding: 14px 30px;
-                font-size: 14px;
-                font-weight: 500;
+                border-radius: 7px; padding: 14px 30px; font-size: 14px; font-weight: 500;
             }
             """
         )
@@ -155,13 +121,8 @@ class LoginDialog(QtWidgets.QDialog):
         btn_close.setFixedSize(32, 32)
         btn_close.setCursor(QtCore.Qt.PointingHandCursor)
         btn_close.setStyleSheet(
-            """
-            QPushButton {
-                background: transparent; color: #737373; border: none;
-                font-size: 18px; padding: 0;
-            }
-            QPushButton:hover { color: #171717; background: #f0f0f0; }
-            """
+            "QPushButton { background: transparent; color: #737373; border: none; font-size: 18px; }"
+            "QPushButton:hover { color: #171717; background: #f0f0f0; }"
         )
         btn_close.clicked.connect(self.reject)
         btn_close.setAutoDefault(False)
@@ -191,34 +152,24 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addWidget(title)
         layout.addSpacing(6)
 
-        subtitle = QtWidgets.QLabel("Đăng nhập bằng API Key (tts-api)")
+        subtitle = QtWidgets.QLabel("Tool local · fast_tts preview · không server API")
         subtitle.setStyleSheet("color: #737373; font-size: 12px;")
         subtitle.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(subtitle)
-        layout.addSpacing(20)
-
-        self.ed_base = QtWidgets.QLineEdit()
-        self.ed_base.setPlaceholderText("🌐  Server URL")
-        self.ed_base.setMinimumHeight(48)
-        self.ed_base.setText(
-            saved.get("base_url") or cfg.get("base_url") or "https://tts-origin.liveyt.pro"
-        )
-        layout.addWidget(self.ed_base)
-        layout.addSpacing(12)
+        layout.addSpacing(22)
 
         self.ed_username = QtWidgets.QLineEdit()
-        self.ed_username.setPlaceholderText("👤  Tên account (tuỳ chọn)")
-        self.ed_username.setMinimumHeight(48)
-        self.ed_username.setText(saved.get("username", ""))
+        self.ed_username.setPlaceholderText("👤  Tên đăng nhập")
+        self.ed_username.setMinimumHeight(50)
+        self.ed_username.setText(saved.get("username") or "admin")
         layout.addWidget(self.ed_username)
-        layout.addSpacing(12)
+        layout.addSpacing(14)
 
         self.ed_password = QtWidgets.QLineEdit()
         self.ed_password.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.ed_password.setPlaceholderText("🔑  API Key (tts_...)")
-        self.ed_password.setMinimumHeight(48)
-        # prefer saved password as api key; else config
-        self.ed_password.setText(saved.get("password") or cfg.get("api_key") or "")
+        self.ed_password.setPlaceholderText("🔒  Mật khẩu")
+        self.ed_password.setMinimumHeight(50)
+        self.ed_password.setText(saved.get("password") or "admin123")
         layout.addWidget(self.ed_password)
         layout.addSpacing(10)
 
@@ -234,42 +185,40 @@ class LoginDialog(QtWidgets.QDialog):
         self.bt_login.setMinimumHeight(52)
         self.bt_login.setCursor(QtCore.Qt.PointingHandCursor)
         self.bt_login.setStyleSheet(
-            """
-            QPushButton {
-                background: #171717; color: #ffffff; border: 1px solid #171717;
-            }
-            QPushButton:hover { background: #333333; }
-            QPushButton:disabled {
-                background: #e5e5e5; color: #999999; border-color: #d4d4d4;
-            }
-            """
+            "QPushButton { background: #171717; color: #ffffff; border: 1px solid #171717; }"
+            "QPushButton:hover { background: #333333; }"
+            "QPushButton:disabled { background: #e5e5e5; color: #999; }"
         )
         layout.addWidget(self.bt_login)
         self.bt_login.setDefault(True)
-        layout.addSpacing(14)
+        layout.addSpacing(12)
+
+        self.bt_register = QtWidgets.QPushButton("Tạo account mới")
+        self.bt_register.setMinimumHeight(40)
+        self.bt_register.setCursor(QtCore.Qt.PointingHandCursor)
+        self.bt_register.setStyleSheet(
+            "QPushButton { background: #ffffff; color: #171717; border: 1px solid #c9c9c9; }"
+            "QPushButton:hover { background: #f0f0f0; border: 1px solid #171717; }"
+        )
+        layout.addWidget(self.bt_register)
+        layout.addSpacing(10)
 
         self.bt_exit = QtWidgets.QPushButton("THOÁT")
-        self.bt_exit.setMinimumHeight(44)
-        self.bt_exit.setCursor(QtCore.Qt.PointingHandCursor)
+        self.bt_exit.setMinimumHeight(42)
         self.bt_exit.setStyleSheet(
-            """
-            QPushButton {
-                background: #ffffff; color: #171717; border: 1px solid #c9c9c9;
-            }
-            QPushButton:hover {
-                background: #f0f0f0; border: 1px solid #171717;
-            }
-            """
+            "QPushButton { background: #ffffff; color: #171717; border: 1px solid #c9c9c9; }"
+            "QPushButton:hover { background: #f0f0f0; }"
         )
         layout.addWidget(self.bt_exit)
         layout.addStretch()
 
-        footer = QtWidgets.QLabel("© 2026 HuyViet Preview Studio · tts-api")
+        footer = QtWidgets.QLabel("© 2026 Preview Studio · local tool")
         footer.setStyleSheet("color: #a3a3a3; font-size: 11px;")
         footer.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(footer)
 
         self.bt_login.clicked.connect(self._login)
+        self.bt_register.clicked.connect(self._register)
         self.bt_exit.clicked.connect(self.reject)
         self.ed_password.returnPressed.connect(self._login)
         self._center()
@@ -287,41 +236,43 @@ class LoginDialog(QtWidgets.QDialog):
 
     def _login(self):
         self.lbl_error.setVisible(False)
-        base = self.ed_base.text().strip().rstrip("/")
-        api_key = self.ed_password.text().strip()
-        name = self.ed_username.text().strip() or "user"
-        if not base or not api_key:
-            self._show_error("Nhập Server URL và API Key!")
-            return
-        if not api_key.startswith("tts_"):
-            self._show_error("API Key phải dạng tts_...")
+        u = self.ed_username.text().strip()
+        p = self.ed_password.text()
+        if not u or not p:
+            self._show_error("Nhập username / password!")
             return
         self.bt_login.setEnabled(False)
         self.bt_login.setText("Đang đăng nhập...")
         QtWidgets.QApplication.processEvents()
         try:
-            client = TtsApiClient(base, api_key=api_key)
-            me = client.me()
-            self.user = {
-                "id": me.get("id"),
-                "username": name or me.get("name") or "user",
-                "name": me.get("name"),
-                "api_key": api_key,
-                "base_url": base,
-                "me": me,
-            }
-            self.client = client
-            cfg = load_config()
-            cfg["base_url"] = base
-            cfg["api_key"] = api_key
-            save_config(cfg)
-            _save_login_temp(name, api_key, base)
+            row = accounts.authenticate(u, p)
+            if not row:
+                self._show_error("Sai tên đăng nhập hoặc mật khẩu!")
+                return
+            self.user = row
+            _save_login_temp(u, p)
             self.accept()
         except Exception as exc:
-            self._show_error(f"Lỗi: {str(exc)[:80]}")
+            self._show_error(str(exc)[:80])
         finally:
             self.bt_login.setEnabled(True)
             self.bt_login.setText("ĐĂNG NHẬP")
+
+    def _register(self):
+        u = self.ed_username.text().strip()
+        p = self.ed_password.text()
+        if not u or not p:
+            self._show_error("Nhập username + password để tạo account!")
+            return
+        try:
+            accounts.create_account(u, p)
+            self._show_error("")  # clear
+            self.lbl_error.setStyleSheet("color: #166534; font-size: 12px;")
+            self.lbl_error.setText(f"✅ Đã tạo account '{u}' — bấm ĐĂNG NHẬP")
+            self.lbl_error.setVisible(True)
+        except Exception as exc:
+            self.lbl_error.setStyleSheet("color: #991b1b; font-size: 12px;")
+            self._show_error(str(exc)[:80])
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
@@ -335,14 +286,13 @@ class LoginDialog(QtWidgets.QDialog):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, user: dict, client: TtsApiClient):
+    def __init__(self, user: dict):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1260, 820)
         self.setMinimumSize(1040, 680)
         self.user = user
-        self.client = client
-        self._tab = PreviewTab(self, client, user, load_config, save_config)
+        self._tab = PreviewTab(self, user, load_config, save_config)
         self.setCentralWidget(self._tab)
         self.setStyleSheet("QMainWindow { background: #f2f2f2; }")
 
@@ -361,7 +311,7 @@ def main() -> int:
         login = LoginDialog()
         if login.exec() != QtWidgets.QDialog.Accepted or not login.user:
             return 0
-        window = MainWindow(login.user, login.client)
+        window = MainWindow(login.user)
         window.show()
         return app.exec()
     except Exception:
@@ -369,9 +319,7 @@ def main() -> int:
         with open(crash, "w", encoding="utf-8") as f:
             f.write(traceback.format_exc())
         try:
-            QtWidgets.QMessageBox.critical(
-                None, "Lỗi", f"Crash log:\n{crash}"
-            )
+            QtWidgets.QMessageBox.critical(None, "Lỗi", f"Crash log:\n{crash}")
         except Exception:
             pass
         raise
