@@ -126,6 +126,9 @@ class ProxyPool:
         sid = str(data.get("id") or f"px{int(time.time())}")
         existing = self.slots.get(sid)
         if existing:
+            prev_host = existing.host
+            prev_port = existing.port
+            prev_user = existing.username
             for k in (
                 "label",
                 "enabled",
@@ -138,10 +141,24 @@ class ProxyPool:
             ):
                 if k in data and data[k] is not None:
                     setattr(existing, k, data[k] if k != "port" else int(data[k]))
+            creds_changed = (
+                existing.host != prev_host
+                or int(existing.port) != int(prev_port)
+                or existing.username != prev_user
+                or ("api_key" in data and data.get("api_key") is not None)
+                or ("password" in data and data.get("password") is not None)
+            )
             if not existing.enabled:
                 existing.state = SlotState.DISABLED
-            elif existing.state == SlotState.DISABLED:
+            elif existing.state == SlotState.DISABLED or creds_changed:
+                # New credentials / re-enable: leave ROTATING/DEAD so workers can lease
                 existing.state = SlotState.READY
+                existing.proxy_url = ""
+                existing.exit_ip = ""
+                existing.fail_streak = 0
+                existing.cooldown_until = 0.0
+                existing.last_error = ""
+                existing.ready.set()
             slot = existing
         else:
             slot = ProxySlot(
