@@ -3,8 +3,8 @@ from __future__ import annotations
 import secrets
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 
 from ..config import AUDIO_DIR, load_settings, save_settings
 from ..db import Database
@@ -19,21 +19,44 @@ from ..services.proxy_pool import pool
 
 router = APIRouter(prefix="/admin/api", tags=["admin"])
 
+COOKIE_NAME = "tts_admin_token"
+COOKIE_MAX_AGE = 86400 * 7
+
 
 def get_db(request: Request) -> Database:
     return request.app.state.db
 
 
+def _extract_admin_token(
+    request: Request,
+    x_admin_token: Optional[str],
+    authorization: Optional[str],
+) -> Optional[str]:
+    if x_admin_token and x_admin_token.strip():
+        return x_admin_token.strip()
+    if authorization:
+        raw = authorization.strip()
+        if raw.lower().startswith("bearer "):
+            return raw[7:].strip()
+    # cookie (works when custom headers stripped / same-origin)
+    for name in (COOKIE_NAME, "admin_token"):
+        val = request.cookies.get(name)
+        if val and val.strip():
+            return val.strip()
+    return None
+
+
 async def require_admin(
     request: Request,
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    authorization: Optional[str] = Header(None),
 ) -> str:
-    token = x_admin_token or request.cookies.get("admin_token")
+    token = _extract_admin_token(request, x_admin_token, authorization)
     if not token:
         raise HTTPException(401, "admin auth required")
     db: Database = request.app.state.db
     if not await db.valid_session(token):
-        raise HTTPException(401, "invalid or expired session")
+        raise HTTPException(401, "session expired")
     return token
 
 
@@ -45,14 +68,33 @@ async def login(body: AdminLogin, request: Request, db: Database = Depends(get_d
     if not expected or got != expected:
         raise HTTPException(401, "wrong password")
     token = secrets.token_urlsafe(32)
-    await db.create_session(token)
-    return {"ok": True, "token": token}
+    await db.create_session(token, ttl_sec=COOKIE_MAX_AGE)
+    resp = JSONResponse({"ok": True, "token": token})
+    # Same-site cookie so browser always sends auth even if X-Admin-Token fails
+    resp.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https"
+        or (request.headers.get("x-forwarded-proto") == "https"),
+        path="/",
+    )
+    return resp
 
 
 @router.post("/logout")
-async def logout(token: str = Depends(require_admin), db: Database = Depends(get_db)):
+async def logout(
+    response: Response,
+    token: str = Depends(require_admin),
+    db: Database = Depends(get_db),
+):
     await db.delete_session(token)
-    return {"ok": True}
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(COOKIE_NAME, path="/")
+    response.delete_cookie("admin_token", path="/")
+    return response
 
 
 @router.get("/dashboard")

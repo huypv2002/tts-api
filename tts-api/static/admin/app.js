@@ -16,8 +16,15 @@ function toast(msg) {
 
 async function api(path, opts = {}) {
   const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
-  if (state.token) headers["X-Admin-Token"] = state.token;
-  const res = await fetch(`/admin/api${path}`, { ...opts, headers });
+  if (state.token) {
+    headers["X-Admin-Token"] = state.token;
+    headers["Authorization"] = `Bearer ${state.token}`;
+  }
+  const res = await fetch(`/admin/api${path}`, {
+    ...opts,
+    headers,
+    credentials: "same-origin", // send httpOnly cookie backup
+  });
   const text = await res.text();
   let data;
   try {
@@ -27,9 +34,25 @@ async function api(path, opts = {}) {
   }
   if (!res.ok) {
     const msg = data.detail || data.error || res.statusText;
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    err.status = res.status;
+    err.code = res.status;
+    throw err;
   }
   return data;
+}
+
+function isAuthError(err) {
+  if (!err) return false;
+  if (err.status === 401 || err.code === 401) return true;
+  const m = String(err.message || "").toLowerCase();
+  // ONLY real auth failures — do NOT match generic "invalid" (was kicking users out)
+  return (
+    m === "wrong password" ||
+    m.includes("admin auth required") ||
+    m.includes("session expired") ||
+    m.includes("expired session")
+  );
 }
 
 function showLogin() {
@@ -73,14 +96,27 @@ async function login(e) {
   const errEl = $("#login-error");
   if (errEl) errEl.textContent = "";
   try {
+    // Clear stale token BEFORE login so we never send a dead X-Admin-Token
+    state.token = "";
+    localStorage.removeItem("tts_admin_token");
     const password = $("#password").value;
-    const data = await api("/login", { method: "POST", body: JSON.stringify({ password }) });
+    const data = await api("/login", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+    if (!data.token) {
+      throw new Error("login ok but no token returned");
+    }
     state.token = data.token;
     localStorage.setItem("tts_admin_token", state.token);
     showApp();
+    // Load overview; if it fails for non-auth reasons, stay logged in and show error
     await navigate("overview");
   } catch (err) {
-    if (errEl) errEl.textContent = err.message;
+    state.token = "";
+    localStorage.removeItem("tts_admin_token");
+    showLogin();
+    if (errEl) errEl.textContent = err.message || "Login failed";
   }
 }
 
@@ -125,11 +161,18 @@ async function navigate(page) {
     else if (page === "jobs") await renderJobs(root);
     else if (page === "usage") await renderUsage(root);
   } catch (err) {
-    if (String(err.message).includes("401") || /auth|session|invalid/i.test(err.message)) {
+    console.error("navigate error", page, err);
+    if (isAuthError(err)) {
+      state.token = "";
+      localStorage.removeItem("tts_admin_token");
       showLogin();
+      const errEl = $("#login-error");
+      if (errEl) errEl.textContent = "Session hết hạn — đăng nhập lại";
       return;
     }
-    root.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+    // Stay in app — show error, do NOT kick to login
+    root.innerHTML = `<p class="error">${esc(err.message)}</p>
+      <p class="muted">Token vẫn còn — thử Refresh. Nếu lặp lại: hard refresh (Ctrl+Shift+R).</p>`;
   }
 }
 
@@ -145,8 +188,9 @@ function badge(status) {
 
 async function renderOverview(root) {
   const d = await api("/dashboard");
-  const st = d.usage.jobs_by_status || {};
+  const st = (d.usage && d.usage.jobs_by_status) || {};
   const px = d.proxy || {};
+  const settings = d.settings || {};
   const queued = (st.queued || 0) + (st.running || 0);
   root.innerHTML = `
     <div class="cards">
@@ -155,7 +199,7 @@ async function renderOverview(root) {
       <div class="card"><div class="k">Jobs done</div><div class="v ok">${st.done || 0}</div><div class="hint">all time status</div></div>
       <div class="card"><div class="k">In flight</div><div class="v warn">${queued}</div><div class="hint">queued + running</div></div>
       <div class="card"><div class="k">Failed</div><div class="v ${st.failed ? "danger" : ""}">${st.failed || 0}</div><div class="hint">needs attention</div></div>
-      <div class="card"><div class="k">Max chars</div><div class="v">${d.settings.default_max_chars}</div><div class="hint">default / request</div></div>
+      <div class="card"><div class="k">Max chars</div><div class="v">${settings.default_max_chars ?? "—"}</div><div class="hint">default / request</div></div>
     </div>
     <div class="panel">
       <h3>Proxy slots</h3>
@@ -728,13 +772,17 @@ function wireUi() {
 wireUi();
 
 (async () => {
-  showLogin();
-  if (!state.token) return;
+  // Always paint login first; restore session only if token still valid
+  if (!state.token) {
+    showLogin();
+    return;
+  }
   try {
     await api("/dashboard");
     showApp();
     await navigate("overview");
-  } catch {
+  } catch (err) {
+    console.warn("boot session restore failed", err);
     state.token = "";
     localStorage.removeItem("tts_admin_token");
     showLogin();
