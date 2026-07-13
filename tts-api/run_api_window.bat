@@ -19,14 +19,22 @@ if not exist "%VENV_PY%" (
 
 set "PYTHONPATH=%APP%;%ROOT%"
 set "TTS_PORT=8787"
-if "%TTS_PUBLIC_BASE_URL%"=="" set "TTS_PUBLIC_BASE_URL=http://127.0.0.1:8787"
+if "%TTS_PUBLIC_BASE_URL%"=="" set "TTS_PUBLIC_BASE_URL=https://tts-origin.liveyt.pro"
 
 echo ========================================
-echo  TTS API Server
-echo  APP = %APP%
-echo  ROOT= %ROOT%
-echo  URL = http://127.0.0.1:8787/admin/
+echo  TTS API Server  (origin cho Cloudflare Tunnel)
+echo  APP  = %APP%
+echo  ROOT = %ROOT%
+echo  Bind = http://0.0.0.0:8787
+echo  Public via tunnel:
+echo         https://tts-origin.liveyt.pro/admin/
+echo  Local:
+echo         http://127.0.0.1:8787/admin/
 echo ========================================
+echo.
+echo  LUU Y: uvicorn luon listen local 8787.
+echo  cloudflared (cua so TTS-Cloudflare-Tunnel) moi la
+echo  cai publish ra tts-origin.liveyt.pro
 echo.
 
 "%VENV_PY%" -m uvicorn server.main:app --host 0.0.0.0 --port 8787
