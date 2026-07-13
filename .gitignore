@@ -1,6 +1,7 @@
 # deps / envs
 node_modules/
 .venv/
+.venv-tool/
 venv/
 __pycache__/
 *.pyc
@@ -32,9 +33,13 @@ widget_profile/
 tts_loop_1000/
 tts_loop_1000_archive/
 tts_loop_out/
+tts_loop_out_*/
+tts_loop_out_test*/
 elevenlabs_js/
 elevenlabs_js_live/
 *.log
+fast_tts_last.json
+loop_summary.json
 
 # large lock optional keep package-lock
 # package-lock.json

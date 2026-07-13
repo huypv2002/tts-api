@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """
-fast_tts.py — HSW token + anonymous TTS (port từ appTTs token_solver + tts_engine)
+fast_tts.py — HSW token + anonymous TTS (local tool, max speed)
 
-Pipeline (nhanh nhất đã chứng minh trên appTTs):
-  1) tls_client: checksiteconfig → req JWT
-  2) Camoufox: inject hsw.js → hsw(req)
-  3) tls_client: getcaptcha → generated_pass_UUID
+Pipeline:
+  1) tls_client: checksiteconfig → req JWT          (qua proxy job)
+  2) HSW Farm: K Camoufox pages, hsw(req) song song (mặc định NO proxy)
+  3) tls_client: getcaptcha → generated_pass_UUID   (qua proxy job)
   4) httpx: POST .../anonymous (CÙNG proxy) → MP3
+
+Local multi-worker:
+  TokenPool pre-warm token (TTL ~50s) → TTS workers chỉ pop token + call_tts.
+  Dùng qua fast_tts_loop.py hoặc import TokenPool / start_hsw_farm.
 
 Usage:
   python3 fast_tts.py "Hello" --proxy http://user:pass@host:port
   python3 fast_tts.py "Hello" --proxy-key PROXYXOAY_KEY
-  python3 fast_tts.py "Hello" --auto-proxy          # quét free proxy đổi IP
-  HTTP_PROXY=http://host:port python3 fast_tts.py "test" -o out.mp3
+  python3 fast_tts.py "Hello" --auto-proxy
   python3 fast_tts.py --token-only
 
 Env:
   HTTP_PROXY / HTTPS_PROXY / PROXY  — proxy URL
-  PROXYXOAY_KEY                     — key proxyxoay.shop
+  PROXYXOAY_KEY                     — proxyxoay key
+  HSW_WORKERS=3                     — số page HSW song song (default auto 2–4)
+  HSW_VIA_PROXY=0                   — 1 = browser HSW đi proxy (chậm hơn)
 """
 from __future__ import annotations
 
@@ -70,25 +75,53 @@ _hsw_js_cache: dict[str, str] = {}
 _hcaptcha_ver_cache: dict[str, tuple[float, str]] = {}  # proxy_key -> (ts, version)
 _HCAPTCHA_VER_TTL = 300.0
 
-# Reuse Camoufox for HSW (biggest speed win — avoid cold start ~5–15s every job)
-_hsw_browser = None
-_hsw_page = None
-_hsw_proxy_key: str | None = None
-_hsw_js_on_page: str | None = None
-_hsw_lock: asyncio.Lock | None = None
-_hsw_solves = 0
-_HSW_RECYCLE_EVERY = 40  # relaunch browser periodically to avoid leaks
+# ── HSW Farm (local tool): K parallel pages, default NO proxy ─────────────
+# HSW is WASM/JS compute — browser does not need residential proxy.
+# Materials + getcaptcha + TTS still go through the job proxy.
+_HSW_RECYCLE_EVERY = 50  # relaunch a page after N solves (leak guard)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def default_hsw_workers() -> int:
+    """Auto-size HSW pages from CPU (capped — Camoufox is heavy)."""
+    n = _env_int("HSW_WORKERS", 0)
+    if n > 0:
+        return max(1, min(n, 8))
+    cpus = os.cpu_count() or 4
+    # 2–4 pages is the sweet spot on most laptops/servers
+    return max(2, min(4, max(2, cpus // 3)))
 
 
 def _proxy_key(proxy_http: str | None) -> str:
     return proxy_http or "__direct__"
 
 
-def _get_hsw_lock() -> asyncio.Lock:
-    global _hsw_lock
-    if _hsw_lock is None:
-        _hsw_lock = asyncio.Lock()
-    return _hsw_lock
+# Module-level farm (lazy). Prefer get_hsw_farm() / start_hsw_farm().
+_hsw_farm: "HswFarm | None" = None
+_hsw_farm_lock: asyncio.Lock | None = None
+
+
+def _farm_lock() -> asyncio.Lock:
+    global _hsw_farm_lock
+    if _hsw_farm_lock is None:
+        _hsw_farm_lock = asyncio.Lock()
+    return _hsw_farm_lock
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -197,71 +230,93 @@ def _fetch_hsw_js(req_token: str, proxy_http: str | None) -> tuple[str, str]:
     return cache_key, hsw_js
 
 
-async def _close_hsw_browser() -> None:
-    global _hsw_browser, _hsw_page, _hsw_proxy_key, _hsw_js_on_page, _hsw_solves
-    try:
-        if _hsw_page is not None:
-            await _hsw_page.close()
-    except Exception:
-        pass
-    try:
-        if _hsw_browser is not None:
-            if hasattr(_hsw_browser, "stop"):
-                await _hsw_browser.stop()
-            elif hasattr(_hsw_browser, "close"):
-                await _hsw_browser.close()
-    except Exception:
-        pass
-    _hsw_browser = None
-    _hsw_page = None
-    _hsw_proxy_key = None
-    _hsw_js_on_page = None
-    _hsw_solves = 0
+class _HswPage:
+    """One Camoufox page that can run hsw(req) under its own lock."""
+
+    __slots__ = ("idx", "page", "lock", "js_key", "solves", "alive")
+
+    def __init__(self, idx: int, page):
+        self.idx = idx
+        self.page = page
+        self.lock = asyncio.Lock()
+        self.js_key: str | None = None
+        self.solves = 0
+        self.alive = True
 
 
-async def _ensure_hsw_page(proxy_http: str | None, hsw_js: str, cache_key: str):
-    """Keep one warm Camoufox page per process; relaunch on proxy change / errors."""
-    global _hsw_browser, _hsw_page, _hsw_proxy_key, _hsw_js_on_page, _hsw_solves
+class HswFarm:
+    """
+    Parallel HSW solvers for local multi-worker tools.
 
-    pk = _proxy_key(proxy_http)
-    need_new = (
-        _hsw_page is None
-        or _hsw_browser is None
-        or _hsw_proxy_key != pk
-        or _hsw_solves >= _HSW_RECYCLE_EVERY
-    )
-    if not need_new:
-        try:
-            ok = await _hsw_page.evaluate("typeof hsw === 'function'")
-            if ok and _hsw_js_on_page == cache_key:
-                return _hsw_page
-            # reinject if page alive but wrong/missing hsw
-            if ok and _hsw_js_on_page != cache_key:
-                await _hsw_page.evaluate(hsw_js)
-                _hsw_js_on_page = cache_key
-                return _hsw_page
-        except Exception:
-            need_new = True
+    Default: 1 Camoufox browser, K pages, NO residential proxy on the browser.
+    Concurrent hsw() runs on different pages → K× HSW throughput vs old global lock.
+    """
 
-    if need_new:
-        await _close_hsw_browser()
+    def __init__(
+        self,
+        size: int | None = None,
+        via_proxy: bool | None = None,
+    ):
+        self.size = max(1, size if size is not None else default_hsw_workers())
+        # HSW_VIA_PROXY=1 forces browser through job proxy (slower; only if no-proxy fails A/B)
+        self.via_proxy = (
+            _env_bool("HSW_VIA_PROXY", False) if via_proxy is None else via_proxy
+        )
+        self._browser = None
+        self._pages: list[_HswPage] = []
+        self._free: asyncio.Queue | None = None
+        self._start_lock = asyncio.Lock()
+        self._started = False
+        self._browser_proxy: str | None = None  # only used if via_proxy
+        self.total_solves = 0
+
+    @property
+    def workers(self) -> int:
+        return self.size
+
+    async def start(self, proxy_http: str | None = None) -> None:
+        async with self._start_lock:
+            if self._started and self._pages:
+                # via_proxy: relaunch only if browser proxy string changed
+                if self.via_proxy and self._browser_proxy != (proxy_http or None):
+                    await self._shutdown_unlocked()
+                else:
+                    return
+            await self._launch(proxy_http if self.via_proxy else None)
+
+    async def _launch(self, browser_proxy: str | None) -> None:
+        t0 = time.time()
         opts: dict = {
             "headless": True,
             "os": "windows",
             "window": (1280, 720),
         }
-        if proxy_http:
-            opts["proxy"] = {"server": proxy_http}
+        if browser_proxy:
+            opts["proxy"] = {"server": browser_proxy}
         cm = AsyncCamoufox(**opts)
         if hasattr(cm, "start"):
-            _hsw_browser = await cm.start()
+            self._browser = await cm.start()
         else:
-            _hsw_browser = await cm.__aenter__()
-        _hsw_page = await _camoufox_new_page(_hsw_browser)
-        _hsw_proxy_key = pk
-        _hsw_solves = 0
+            self._browser = await cm.__aenter__()
+        self._browser_proxy = browser_proxy
+        self._pages = []
+        self._free = asyncio.Queue()
+        for i in range(self.size):
+            page = await _camoufox_new_page(self._browser)
+            await self._prep_page(page)
+            slot = _HswPage(i, page)
+            self._pages.append(slot)
+            await self._free.put(slot)
+        self._started = True
+        mode = f"proxy={browser_proxy}" if browser_proxy else "no-proxy"
+        log(
+            f"  [hsw-farm] started size={self.size} {mode} "
+            f"in {time.time()-t0:.1f}s"
+        )
+
+    async def _prep_page(self, page) -> None:
         try:
-            await _hsw_page.route(
+            await page.route(
                 f"https://{HOST}/hsw",
                 lambda r: r.fulfill(
                     status=200,
@@ -271,69 +326,193 @@ async def _ensure_hsw_page(proxy_http: str | None, hsw_js: str, cache_key: str):
             )
         except Exception:
             pass
-        # about:blank is faster than full goto when possible
         try:
-            await _hsw_page.goto(
+            await page.goto(
                 f"https://{HOST}/hsw", wait_until="domcontentloaded", timeout=12000
             )
         except Exception:
-            await _hsw_page.goto("about:blank", wait_until="domcontentloaded", timeout=8000)
+            await page.goto("about:blank", wait_until="domcontentloaded", timeout=8000)
         try:
-            await _hsw_page.evaluate(
+            await page.evaluate(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
             )
         except Exception:
             pass
 
-    # inject hsw
-    injected = False
-    try:
-        await _hsw_page.add_script_tag(content=hsw_js)
-        if await _hsw_page.evaluate("typeof hsw === 'function'"):
-            injected = True
-    except Exception:
-        pass
-    if not injected:
-        await _hsw_page.evaluate(hsw_js)
-        if not await _hsw_page.evaluate("typeof hsw === 'function'"):
-            raise RuntimeError("hsw function not available after inject")
-    _hsw_js_on_page = cache_key
-    return _hsw_page
+    async def _inject(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
+        if slot.js_key == cache_key:
+            try:
+                if await slot.page.evaluate("typeof hsw === 'function'"):
+                    return
+            except Exception:
+                pass
+        injected = False
+        try:
+            await slot.page.add_script_tag(content=hsw_js)
+            if await slot.page.evaluate("typeof hsw === 'function'"):
+                injected = True
+        except Exception:
+            pass
+        if not injected:
+            await slot.page.evaluate(hsw_js)
+            if not await slot.page.evaluate("typeof hsw === 'function'"):
+                raise RuntimeError("hsw function not available after inject")
+        slot.js_key = cache_key
+
+    async def _recycle_page(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
+        """Replace a dead/leaky page; keep the rest of the farm warm."""
+        try:
+            await slot.page.close()
+        except Exception:
+            pass
+        page = await _camoufox_new_page(self._browser)
+        await self._prep_page(page)
+        slot.page = page
+        slot.js_key = None
+        slot.solves = 0
+        slot.alive = True
+        await self._inject(slot, hsw_js, cache_key)
+
+    async def solve(self, req_token: str, proxy_http: str | None = None) -> str:
+        """Run hsw(req). proxy_http only used for hsw.js download + via_proxy mode."""
+        t0 = time.time()
+        # hsw.js fetch can use job proxy (TLS) or direct — job proxy is safer on locked nets
+        cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req_token, proxy_http)
+        log(f"  [2/4] hsw.js ready ({len(hsw_js)//1024}KB) farm={self.size}")
+
+        await self.start(proxy_http)
+        assert self._free is not None
+
+        slot: _HswPage = await self._free.get()
+        try:
+            async with slot.lock:
+                try:
+                    if slot.solves >= _HSW_RECYCLE_EVERY:
+                        await self._recycle_page(slot, hsw_js, cache_key)
+                    else:
+                        await self._inject(slot, hsw_js, cache_key)
+                    result = await slot.page.evaluate("(req) => hsw(req)", req_token)
+                    if not result:
+                        raise RuntimeError("hsw() returned empty")
+                except Exception as e:
+                    msg = str(e).lower()
+                    if any(
+                        x in msg
+                        for x in (
+                            "webassembly",
+                            "hsw",
+                            "target closed",
+                            "ismobile",
+                            "destroyed",
+                            "crashed",
+                        )
+                    ):
+                        _hsw_js_cache.pop(cache_key, None)
+                    log(
+                        f"  [2/4] HSW page#{slot.idx} fail, recycle: "
+                        f"{type(e).__name__}: {e}"[:160]
+                    )
+                    await self._recycle_page(slot, hsw_js, cache_key)
+                    result = await slot.page.evaluate("(req) => hsw(req)", req_token)
+                    if not result:
+                        raise RuntimeError("hsw() returned empty after recycle") from e
+
+                slot.solves += 1
+                self.total_solves += 1
+                log(
+                    f"  [2/4] HSW solved ({time.time()-t0:.1f}s, "
+                    f"len={len(str(result))}, page#{slot.idx} "
+                    f"n={slot.solves} farm_total={self.total_solves})"
+                )
+                return result
+        finally:
+            await self._free.put(slot)
+
+    async def warm(self, proxy_http: str | None = None) -> None:
+        """Pre-launch farm + inject current hsw.js so first job is fast."""
+        try:
+            req, _, _ = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
+            cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req, proxy_http)
+            await self.start(proxy_http)
+            assert self._free is not None
+            # inject on every page so all K are ready
+            for _ in range(self.size):
+                slot = await self._free.get()
+                try:
+                    async with slot.lock:
+                        await self._inject(slot, hsw_js, cache_key)
+                finally:
+                    await self._free.put(slot)
+            log(f"  [warm] HSW farm ready size={self.size}")
+        except Exception as e:
+            log(f"  [warm] skip: {e}")
+
+    async def _shutdown_unlocked(self) -> None:
+        for slot in self._pages:
+            try:
+                await slot.page.close()
+            except Exception:
+                pass
+        self._pages.clear()
+        try:
+            if self._browser is not None:
+                if hasattr(self._browser, "stop"):
+                    await self._browser.stop()
+                elif hasattr(self._browser, "close"):
+                    await self._browser.close()
+        except Exception:
+            pass
+        self._browser = None
+        self._browser_proxy = None
+        self._started = False
+        self._free = None
+
+    async def close(self) -> None:
+        async with self._start_lock:
+            await self._shutdown_unlocked()
+
+
+async def get_hsw_farm(
+    size: int | None = None,
+    via_proxy: bool | None = None,
+) -> HswFarm:
+    """Lazy singleton farm (shared by solve_token / loop / token pool)."""
+    global _hsw_farm
+    async with _farm_lock():
+        if _hsw_farm is None:
+            _hsw_farm = HswFarm(size=size, via_proxy=via_proxy)
+        elif size is not None and size != _hsw_farm.size and not _hsw_farm._started:
+            _hsw_farm.size = max(1, size)
+        return _hsw_farm
+
+
+async def start_hsw_farm(
+    size: int | None = None,
+    proxy_http: str | None = None,
+    via_proxy: bool | None = None,
+    warm: bool = True,
+) -> HswFarm:
+    """Explicit start for local tools (call once at loop startup)."""
+    farm = await get_hsw_farm(size=size, via_proxy=via_proxy)
+    if warm:
+        await farm.warm(proxy_http)
+    else:
+        await farm.start(proxy_http)
+    return farm
+
+
+async def close_hsw_farm() -> None:
+    global _hsw_farm
+    async with _farm_lock():
+        if _hsw_farm is not None:
+            await _hsw_farm.close()
+            _hsw_farm = None
 
 
 async def solve_hsw(req_token: str, proxy_http: str | None) -> str:
-    """Camoufox HSW — reuses warm browser (fast path after first solve)."""
-    t0 = time.time()
-    cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req_token, proxy_http)
-    log(f"  [2/4] hsw.js ready ({len(hsw_js)//1024}KB)")
-
-    async with _get_hsw_lock():
-        global _hsw_solves
-        try:
-            page = await _ensure_hsw_page(proxy_http, hsw_js, cache_key)
-            result = await page.evaluate("(req) => hsw(req)", req_token)
-            if not result:
-                raise RuntimeError("hsw() returned empty")
-            _hsw_solves += 1
-            log(
-                f"  [2/4] HSW solved ({time.time()-t0:.1f}s, len={len(str(result))}, "
-                f"warm=#{_hsw_solves})"
-            )
-            return result
-        except Exception as e:
-            # recycle browser and retry once
-            msg = str(e).lower()
-            if "webassembly" in msg or "hsw" in msg or "target closed" in msg or "ismobile" in msg:
-                _hsw_js_cache.pop(cache_key, None)
-            log(f"  [2/4] HSW warm fail, relaunch: {type(e).__name__}: {e}"[:160])
-            await _close_hsw_browser()
-            page = await _ensure_hsw_page(proxy_http, hsw_js, cache_key)
-            result = await page.evaluate("(req) => hsw(req)", req_token)
-            if not result:
-                raise RuntimeError("hsw() returned empty after relaunch")
-            _hsw_solves += 1
-            log(f"  [2/4] HSW solved after relaunch ({time.time()-t0:.1f}s)")
-            return result
+    """Camoufox HSW via parallel farm (backward-compatible entry)."""
+    farm = await get_hsw_farm()
+    return await farm.solve(req_token, proxy_http)
 
 
 async def _camoufox_new_page(browser):
@@ -541,25 +720,204 @@ async def call_tts(
 
 async def solve_token(proxy_http: str | None) -> str:
     """
-    Full captcha token. Materials fetch is thread-offloaded; HSW uses warm browser.
+    Full captcha token (on-demand).
+    materials + getcaptcha via proxy; HSW via farm (default no browser proxy).
     """
+    t0 = time.time()
     req, version, config = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
     hsw = await solve_hsw(req, proxy_http)
     token = await asyncio.to_thread(submit_captcha, hsw, version, config, proxy_http)
+    log(f"  [token] full solve {time.time()-t0:.1f}s")
     return token
 
 
 async def warm_hsw(proxy_http: str | None = None) -> None:
-    """Optional: pre-launch Camoufox so first user request is faster."""
-    try:
-        # dummy path: fetch materials + load page with current hsw.js if possible
-        req, _, _ = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
-        cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req, proxy_http)
-        async with _get_hsw_lock():
-            await _ensure_hsw_page(proxy_http, hsw_js, cache_key)
-        log("  [warm] Camoufox HSW page ready")
-    except Exception as e:
-        log(f"  [warm] skip: {e}")
+    """Pre-launch HSW farm so first request is fast."""
+    farm = await get_hsw_farm()
+    await farm.warm(proxy_http)
+
+
+class TokenRecord:
+    """One captcha token ↔ one TTS call. No TTL — only gen/proxy validity."""
+
+    __slots__ = ("token", "proxy", "gen")
+
+    def __init__(self, token: str, proxy: str | None, gen: int):
+        self.token = token
+        self.proxy = proxy
+        self.gen = gen
+
+
+class TokenPool:
+    """
+    1 token = 1 TTS call. Không quan tâm TTL.
+
+    refillers giữ queue sẵn ≈ target (= số TTS workers) để worker không chờ.
+    take() lấy đúng 1 token cho 1 call_tts.
+    Chỉ vứt token khi rotate proxy (gen đổi) — không drop vì “hết hạn”.
+    """
+
+    def __init__(
+        self,
+        proxy: str | None,
+        target: int = 3,
+        refillers: int | None = None,
+        farm: HswFarm | None = None,
+        **_ignored,  # accept legacy ttl=… without error
+    ):
+        self.proxy = proxy
+        # target = số token sẵn ≈ số TTS call song song (không phải TTL buffer)
+        self.target = max(1, target)
+        self.refillers = max(
+            1, refillers if refillers is not None else min(self.target, 3)
+        )
+        self.farm = farm
+        self.gen = 0
+        self._q: asyncio.Queue[TokenRecord] = asyncio.Queue()
+        self._stop = asyncio.Event()
+        self._tasks: list[asyncio.Task] = []
+        self._lock = asyncio.Lock()
+        self.stats = {
+            "produced": 0,
+            "consumed": 0,
+            "stale": 0,
+            "invalidated": 0,
+            "errors": 0,
+        }
+
+    @property
+    def ready(self) -> int:
+        return self._q.qsize()
+
+    async def start(self) -> None:
+        if self._tasks:
+            return
+        if self.farm is None:
+            self.farm = await get_hsw_farm()
+            await self.farm.start(self.proxy)
+        self._stop.clear()
+        for i in range(self.refillers):
+            self._tasks.append(
+                asyncio.create_task(self._refill_loop(i + 1), name=f"token-refill-{i+1}")
+            )
+        log(
+            f"  [token-pool] start 1token=1tts target={self.target} "
+            f"refillers={self.refillers} proxy={'yes' if self.proxy else 'direct'}"
+        )
+
+    async def stop(self) -> None:
+        self._stop.set()
+        for t in self._tasks:
+            t.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        await self._drain()
+
+    async def _drain(self) -> int:
+        n = 0
+        while not self._q.empty():
+            try:
+                self._q.get_nowait()
+                n += 1
+            except asyncio.QueueEmpty:
+                break
+        if n:
+            self.stats["invalidated"] += n
+        return n
+
+    async def on_proxy_changed(self, proxy: str | None, reason: str = "") -> None:
+        """Rotate IP → vứt token cũ (cùng exit IP mới mới dùng được)."""
+        async with self._lock:
+            self.proxy = proxy
+            self.gen += 1
+            dropped = await self._drain()
+        log(
+            f"  [token-pool] invalidate gen={self.gen} dropped={dropped} "
+            f"reason={reason or 'proxy-change'}"
+        )
+
+    def _usable(self, rec: TokenRecord) -> bool:
+        return rec.gen == self.gen and rec.proxy == self.proxy
+
+    async def take(self, timeout: float = 90.0) -> str:
+        """Lấy đúng 1 token cho 1 TTS. Chờ refillers; hết timeout → mint on-demand."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                rec = self._q.get_nowait()
+            except asyncio.QueueEmpty:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                try:
+                    rec = await asyncio.wait_for(
+                        self._q.get(), timeout=min(0.5, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+            if not self._usable(rec):
+                self.stats["stale"] += 1
+                continue
+            self.stats["consumed"] += 1
+            log(f"  [token-pool] take → tts ready={self.ready}/{self.target}")
+            return rec.token
+
+        log("  [token-pool] starve → on-demand 1 token for 1 tts")
+        return await solve_token(self.proxy)
+
+    async def _mint_one(self, rid: int) -> TokenRecord | None:
+        """Mint đúng 1 token (1 TTS)."""
+        async with self._lock:
+            proxy = self.proxy
+            gen = self.gen
+        try:
+            t0 = time.time()
+            req, version, config = await asyncio.to_thread(
+                get_hcaptcha_materials, proxy
+            )
+            assert self.farm is not None
+            hsw = await self.farm.solve(req, proxy)
+            if gen != self.gen or proxy != self.proxy:
+                log(f"  [token-pool R{rid}] discard stale mint gen={gen}→{self.gen}")
+                return None
+            token = await asyncio.to_thread(
+                submit_captcha, hsw, version, config, proxy
+            )
+            if gen != self.gen:
+                return None
+            rec = TokenRecord(token, proxy, gen)
+            self.stats["produced"] += 1
+            log(
+                f"  [token-pool R{rid}] +1 token ({time.time()-t0:.1f}s) "
+                f"ready≈{self.ready + 1}/{self.target}"
+            )
+            return rec
+        except Exception as e:
+            self.stats["errors"] += 1
+            log(f"  [token-pool R{rid}] mint fail: {type(e).__name__}: {e}"[:160])
+            await asyncio.sleep(0.6)
+            return None
+
+    async def _refill_loop(self, rid: int) -> None:
+        """Giữ sẵn ~target token (= số TTS song song). Mỗi token = 1 call TTS."""
+        while not self._stop.is_set():
+            try:
+                if self.ready >= self.target:
+                    await asyncio.sleep(0.1)
+                    continue
+                rec = await self._mint_one(rid)
+                if rec is None:
+                    await asyncio.sleep(0.15)
+                    continue
+                await self._q.put(rec)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.stats["errors"] += 1
+                log(f"  [token-pool R{rid}] loop: {e}"[:140])
+                await asyncio.sleep(0.8)
 
 
 # proxyxoay.net rotating residential API
@@ -921,62 +1279,80 @@ async def run_once(
 
     last_err: Exception | None = None
     attempt_global = 0
-    for proxy in proxies:
-        if require_proxy and not proxy:
-            continue
-        # soft probe — free proxies flake; still try solve if probe slow/fails
-        if proxy:
-            info = await asyncio.to_thread(probe_proxy_exit, proxy, 12.0)
-            if info.get("changed"):
-                log(f"  [use] {proxy} exit={info.get('exit_ip')}")
-            elif info.get("error"):
-                log(f"  [try] {proxy} probe={info.get('error')[:80]} — still attempt HSW")
-            else:
-                log(
-                    f"  [skip] proxy same-as-direct: {proxy} exit={info.get('exit_ip')}"
-                )
+    # warm 1-page farm for single-shot (still faster after first cold start)
+    try:
+        await start_hsw_farm(
+            size=1,
+            proxy_http=proxies[0] if proxies else None,
+            warm=True,
+        )
+    except Exception as e:
+        log(f"  [warm] optional skip: {e}")
+
+    try:
+        for proxy in proxies:
+            if require_proxy and not proxy:
                 continue
+            # soft probe — free proxies flake; still try solve if probe slow/fails
+            if proxy:
+                info = await asyncio.to_thread(probe_proxy_exit, proxy, 12.0)
+                if info.get("changed"):
+                    log(f"  [use] {proxy} exit={info.get('exit_ip')}")
+                elif info.get("error"):
+                    log(f"  [try] {proxy} probe={info.get('error')[:80]} — still attempt HSW")
+                else:
+                    log(
+                        f"  [skip] proxy same-as-direct: {proxy} exit={info.get('exit_ip')}"
+                    )
+                    continue
 
-        for attempt in range(1, retries + 1):
-            attempt_global += 1
-            try:
-                log(
-                    f"\n══ Attempt {attempt_global} "
-                    f"proxy={proxy or 'DIRECT'} (try {attempt}/{retries}) ══"
-                )
-                t_all = time.time()
-                token = await solve_token(proxy)
-                if token_only:
-                    print(token)
-                    log(f"Total token-only: {time.time()-t_all:.1f}s")
+            for attempt in range(1, retries + 1):
+                attempt_global += 1
+                try:
+                    log(
+                        f"\n══ Attempt {attempt_global} "
+                        f"proxy={proxy or 'DIRECT'} (try {attempt}/{retries}) ══"
+                    )
+                    t_all = time.time()
+                    token = await solve_token(proxy)
+                    if token_only:
+                        print(token)
+                        log(f"Total token-only: {time.time()-t_all:.1f}s")
+                        return 0
+
+                    audio = await call_tts(
+                        text, token, proxy, voice_id, model_id, language_code, speed
+                    )
+                    path = out_path or Path(f"fast_tts_{int(time.time())}.mp3")
+                    path.write_bytes(audio)
+                    meta = {
+                        "proxy": proxy,
+                        "bytes": len(audio),
+                        "file": str(path),
+                        "seconds": round(time.time() - t_all, 2),
+                    }
+                    Path("fast_tts_last.json").write_text(json.dumps(meta, indent=2))
+                    log(
+                        f"✅ Saved {path} ({len(audio)} bytes) "
+                        f"total={time.time()-t_all:.1f}s proxy={proxy}"
+                    )
                     return 0
+                except Exception as e:
+                    last_err = e
+                    log(f"❌ {type(e).__name__}: {e}")
+                    msg = str(e).lower()
+                    if any(
+                        x in msg
+                        for x in ("401", "unusual", "429", "image_challenge", "proxy")
+                    ):
+                        break  # next proxy
+                    if attempt < retries:
+                        await asyncio.sleep(1.2)
 
-                audio = await call_tts(
-                    text, token, proxy, voice_id, model_id, language_code, speed
-                )
-                path = out_path or Path(f"fast_tts_{int(time.time())}.mp3")
-                path.write_bytes(audio)
-                meta = {
-                    "proxy": proxy,
-                    "bytes": len(audio),
-                    "file": str(path),
-                    "seconds": round(time.time() - t_all, 2),
-                }
-                Path("fast_tts_last.json").write_text(json.dumps(meta, indent=2))
-                log(f"✅ Saved {path} ({len(audio)} bytes) total={time.time()-t_all:.1f}s proxy={proxy}")
-                return 0
-            except Exception as e:
-                last_err = e
-                log(f"❌ {type(e).__name__}: {e}")
-                # rotate proxy on auth/risk failures
-                msg = str(e).lower()
-                if any(x in msg for x in ("401", "unusual", "429", "image_challenge", "proxy")):
-                    break  # next proxy
-                if attempt < retries:
-                    await asyncio.sleep(1.2)
-
-    log(f"FAILED after all proxies: {last_err}")
-    return 1
+        log(f"FAILED after all proxies: {last_err}")
+        return 1
+    finally:
+        await close_hsw_farm()
 
 
 def resolve_proxy(cli_proxy: str | None) -> str | None:

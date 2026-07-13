@@ -1,0 +1,9 @@
+{
+  "api_key": "YOUR_PROXYXOAY_API_KEY",
+  "username": "YOUR_USERNAME",
+  "password": "YOUR_PASSWORD",
+  "host": "vipvn7.proxyxoay.net",
+  "http_port": 8978,
+  "docs": "https://proxyxoay.net/api-document/rotating",
+  "note": "Copy this file to .proxyxoay.json and fill real values"
+}

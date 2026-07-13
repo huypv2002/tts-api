@@ -1,0 +1,7 @@
+# Local TTS tool (fast_tts.py + fast_tts_loop.py) — Windows / Mac
+httpx>=0.27.0
+tls-client>=1.0.1
+PyJWT>=2.8.0
+camoufox>=0.4.0
+# Playwright 1.61+ breaks Camoufox Firefox (isMobile viewport)
+playwright>=1.48.0,<1.61.0
