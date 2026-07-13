@@ -10,6 +10,7 @@ from ..config import AUDIO_DIR, PARENT, load_settings
 from ..db import Database
 from .proxy_pool import pool
 
+# IP / edge blocks — must rotate exit IP then retry SAME job
 BLOCK_MARKERS = (
     "quota_exceeded",
     "sign_in_required",
@@ -20,10 +21,16 @@ BLOCK_MARKERS = (
     "tts http 403",
     "tts http 401",
     "tts http 429",
+    "http 403",
+    "http 401",
+    "http 429",
     "forbidden",
     "access denied",
+    "image_challenge",
+    "unauthorized",
 )
 
+# Network flake — soft retry; rotate after repeated hits on same slot
 TRANSIENT_MARKERS = (
     "timeout",
     "timed out",
@@ -31,16 +38,29 @@ TRANSIENT_MARKERS = (
     "dial tcp",
     "connection reset",
     "connection refused",
+    "connection aborted",
+    "broken pipe",
+    "eof",
     "tlsclient",
     "connecterror",
     "proxyerror",
     "network is unreachable",
     "temporarily unavailable",
     "server disconnected",
+    "remoteprotocolerror",
     "ssl",
+    "certificate",
+    "connect timeout",
+    "read timeout",
+    "pool timeout",
 )
 
-# Shared wake signal when new jobs are enqueued (low latency claim)
+# True terminal — do not spin forever
+FATAL_MARKERS = (
+    "empty text",
+    "empty after normalize",
+)
+
 job_wakeup = asyncio.Event()
 
 _solve_token: Optional[Callable] = None
@@ -56,16 +76,22 @@ def notify_job() -> None:
         pass
 
 
+def _blob(err: BaseException) -> str:
+    return f"{type(err).__name__}: {err}".lower()
+
+
 def _is_transient(err: BaseException) -> bool:
-    blob = f"{type(err).__name__}: {err}".lower()
-    return any(m in blob for m in TRANSIENT_MARKERS)
+    return any(m in _blob(err) for m in TRANSIENT_MARKERS)
 
 
 def _is_block(err: BaseException) -> bool:
     if _is_transient(err):
         return False
-    msg = str(err).lower()
-    return any(m in msg for m in BLOCK_MARKERS)
+    return any(m in _blob(err) for m in BLOCK_MARKERS)
+
+
+def _is_fatal(err: BaseException) -> bool:
+    return any(m in _blob(err) for m in FATAL_MARKERS)
 
 
 def _import_tts():
@@ -91,6 +117,19 @@ def _import_tts():
 
 
 class WorkerManager:
+    """
+    Job reliability policy (near-100% when proxy line is alive):
+
+      for attempt in 1..job_max_attempts (default 50) within job_max_seconds (30m):
+        lease proxy (heal stuck slots while waiting)
+        solve_token + call_tts
+        OK  → done
+        block / 401 / image_challenge → rotate THIS slot → retry SAME job
+        transient / dial fail → soft retry; every 2nd hit also rotate
+        no proxy ready → wait & heal, NEVER fail until budget exhausted
+        fatal config only → fail early
+    """
+
     def __init__(self, db: Database):
         self.db = db
         self._tasks: list[asyncio.Task] = []
@@ -99,7 +138,6 @@ class WorkerManager:
         self._settings_at = 0.0
 
     def _settings(self) -> dict:
-        # cache settings 5s to avoid disk thrash
         now = time.time()
         if self._settings_cache and (now - self._settings_at) < 5:
             return self._settings_cache
@@ -111,7 +149,7 @@ class WorkerManager:
         settings = self._settings()
         n = max(1, int(settings.get("worker_count") or 4))
         self._stop.clear()
-        # warm HSW browser in background (don't block API start)
+        pool.start_background()
         asyncio.create_task(self._warm_background(), name="hsw-warm")
         for i in range(n):
             self._tasks.append(asyncio.create_task(self._loop(i + 1), name=f"w{i+1}"))
@@ -122,7 +160,6 @@ class WorkerManager:
             _import_tts()
             if _warm_hsw is None:
                 return
-            # warm with first ready proxy if any
             proxy = None
             for s in pool.slots.values():
                 if s.enabled and s.proxy_url:
@@ -152,7 +189,6 @@ class WorkerManager:
             try:
                 job = await self.db.claim_next_job()
                 if not job:
-                    # sleep until notify or short poll (faster than fixed 400ms)
                     job_wakeup.clear()
                     try:
                         await asyncio.wait_for(job_wakeup.wait(), timeout=0.15)
@@ -174,30 +210,51 @@ class WorkerManager:
         model = job.get("model") or settings["default_model"]
         lang = job.get("lang") or settings["default_lang"]
         speed = float(job.get("speed") or 1.0)
-        max_attempts = 6
+
+        max_attempts = max(5, int(settings.get("job_max_attempts") or 50))
+        max_seconds = max(60, int(settings.get("job_max_seconds") or 1800))
+        lease_timeout = float(settings.get("proxy_lease_timeout_s") or 25)
         t0 = time.time()
         solve_token, call_tts = _import_tts()
 
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        soft_on_slot = 0  # consecutive soft fails without rotate
+
+        while attempt < max_attempts and (time.time() - t0) < max_seconds:
             if self._stop.is_set():
                 return
-            slot = await pool.lease(timeout=90.0)
+            attempt += 1
+
+            slot = await pool.lease(timeout=lease_timeout)
             if not slot:
+                # Do NOT fail the job — heal + wait for proxy to come back
+                await pool.heal_stuck_slots()
+                wait_msg = (
+                    f"waiting for proxy (attempt {attempt}/{max_attempts}, "
+                    f"elapsed {int(time.time()-t0)}s)"
+                )
+                print(f"[W{wid}] {jid[:8]} {wait_msg}", flush=True)
                 await self.db.update_job(
                     jid,
-                    status="failed",
-                    error="no proxy slot available",
-                    finished_at=_iso(),
-                    duration_ms=int((time.time() - t0) * 1000),
+                    error=wait_msg,
+                    attempts=attempt,
                 )
-                return
+                await asyncio.sleep(min(2.0 + attempt * 0.1, 8.0))
+                continue
 
             out = AUDIO_DIR / f"{jid}.mp3"
             try:
                 print(
-                    f"[W{wid}] job={jid[:8]} attempt={attempt} slot={slot.id} "
-                    f"exit={slot.exit_ip or '?'}",
+                    f"[W{wid}] job={jid[:8]} attempt={attempt}/{max_attempts} "
+                    f"slot={slot.id} exit={slot.exit_ip or '?'}",
                     flush=True,
+                )
+                await self.db.update_job(
+                    jid,
+                    error=None,
+                    proxy_id=slot.id,
+                    exit_ip=slot.exit_ip,
+                    attempts=attempt,
                 )
                 t_token = time.time()
                 token = await solve_token(slot.proxy_url)
@@ -217,6 +274,7 @@ class WorkerManager:
                     finished_at=_iso(),
                     duration_ms=int((time.time() - t0) * 1000),
                     error=None,
+                    attempts=attempt,
                 )
                 if job.get("api_key_id"):
                     await self.db.record_success_usage(
@@ -225,46 +283,117 @@ class WorkerManager:
                 print(
                     f"[W{wid}] DONE {jid[:8]} {len(audio)}B slot={slot.id} "
                     f"token={t_tts-t_token:.1f}s tts={time.time()-t_tts:.1f}s "
-                    f"total={time.time()-t0:.1f}s",
+                    f"total={time.time()-t0:.1f}s attempts={attempt}",
                     flush=True,
                 )
                 return
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 err_short = " ".join(err.replace("\n", " ").split())[:300]
-                print(f"[W{wid}] FAIL {jid[:8]}: {err_short[:180]}", flush=True)
+                print(
+                    f"[W{wid}] FAIL {jid[:8]} a={attempt}: {err_short[:160]}",
+                    flush=True,
+                )
+
                 if "isMobile" in err or "setDefaultViewport" in err:
                     err_short = (
                         "Camoufox/Playwright viewport bug (isMobile). "
-                        "On Windows run: fix_playwright.bat then restart start_all.bat "
-                        f"| {err_short[:160]}"
+                        "On Windows: fix_playwright.bat then restart | "
+                        f"{err_short[:120]}"
                     )
-                if _is_block(e):
-                    await pool.release_block_and_rotate(slot, err_short)
-                    await self.db.update_job(jid, error=err_short, proxy_id=slot.id)
-                    await asyncio.sleep(0.3)
-                    continue
-                if _is_transient(e):
                     await pool.release_transient(slot, err_short)
-                    await asyncio.sleep(min(0.5 * attempt, 2.5))
+                    await self.db.update_job(jid, error=err_short, proxy_id=slot.id)
+                    # retry a few times in case farm recovers; then fail
+                    if attempt >= 3:
+                        await self.db.update_job(
+                            jid,
+                            status="failed",
+                            error=err_short,
+                            finished_at=_iso(),
+                            duration_ms=int((time.time() - t0) * 1000),
+                            attempts=attempt,
+                        )
+                        return
+                    await asyncio.sleep(1.0)
                     continue
-                await pool.release_transient(slot, err_short)
+
+                if _is_fatal(e):
+                    await pool.release_transient(slot, err_short)
+                    await self.db.update_job(
+                        jid,
+                        status="failed",
+                        error=err_short,
+                        proxy_id=slot.id,
+                        finished_at=_iso(),
+                        duration_ms=int((time.time() - t0) * 1000),
+                        attempts=attempt,
+                    )
+                    return
+
+                # ── block / captcha / 401 → rotate IP, retry SAME job ──
+                if _is_block(e):
+                    soft_on_slot = 0
+                    await pool.release_block_and_rotate(slot, err_short)
+                    await self.db.update_job(
+                        jid,
+                        error=f"block→rotate a{attempt}: {err_short[:180]}",
+                        proxy_id=slot.id,
+                        attempts=attempt,
+                    )
+                    await asyncio.sleep(0.4)
+                    continue
+
+                # ── transient network ──
+                if _is_transient(e):
+                    soft_on_slot += 1
+                    # After 2 soft fails on a row → rotate (IP/tunnel may be dead)
+                    if soft_on_slot >= 2:
+                        soft_on_slot = 0
+                        await pool.release_block_and_rotate(
+                            slot, f"transient×2→rotate: {err_short}"
+                        )
+                        await self.db.update_job(
+                            jid,
+                            error=f"transient→rotate a{attempt}: {err_short[:160]}",
+                            proxy_id=slot.id,
+                            attempts=attempt,
+                        )
+                    else:
+                        await pool.release_transient(slot, err_short)
+                        await self.db.update_job(
+                            jid,
+                            error=f"transient a{attempt}: {err_short[:160]}",
+                            proxy_id=slot.id,
+                            attempts=attempt,
+                        )
+                    await asyncio.sleep(min(0.5 * attempt, 3.0))
+                    continue
+
+                # ── unknown: assume risk → rotate + retry (do not drop job) ──
+                soft_on_slot = 0
+                await pool.release_block_and_rotate(
+                    slot, f"unknown→rotate: {err_short}"
+                )
                 await self.db.update_job(
                     jid,
-                    status="failed",
-                    error=err_short,
+                    error=f"retry a{attempt}: {err_short[:180]}",
                     proxy_id=slot.id,
-                    finished_at=_iso(),
-                    duration_ms=int((time.time() - t0) * 1000),
+                    attempts=attempt,
                 )
-                return
+                await asyncio.sleep(0.5)
+                continue
 
+        # Budget exhausted — last resort fail (should be rare)
         await self.db.update_job(
             jid,
             status="failed",
-            error="max attempts exceeded",
+            error=(
+                f"gave up after {attempt} attempts / {int(time.time()-t0)}s "
+                f"(max_attempts={max_attempts}, max_seconds={max_seconds})"
+            ),
             finished_at=_iso(),
             duration_ms=int((time.time() - t0) * 1000),
+            attempts=attempt,
         )
 
 

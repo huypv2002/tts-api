@@ -72,6 +72,10 @@ def load_settings() -> dict:
     merged.setdefault("default_max_concurrent", 2)
     merged.setdefault("inflight_per_proxy", 3)
     merged.setdefault("worker_count", 6)
+    # near-100% job success: retry + rotate until budget exhausted
+    merged.setdefault("job_max_attempts", 50)
+    merged.setdefault("job_max_seconds", 1800)
+    merged.setdefault("proxy_lease_timeout_s", 25)
     merged.setdefault("host", "0.0.0.0")
     merged.setdefault("port", 8787)
     merged.setdefault("public_base_url", "")

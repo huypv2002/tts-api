@@ -14,6 +14,10 @@ from ..config import load_proxies_file, save_proxies_file, load_settings
 PROXYXOAY_STATUS = "https://proxyxoay.net/api/rotating-proxy/key-status/{key}"
 PROXYXOAY_CHANGE = "https://proxyxoay.net/api/rotating-proxy/change-key-ip/{key}"
 
+# How long a slot may stay ROTATING before auto-heal
+ROTATING_STUCK_S = 180.0
+DEAD_COOLDOWN_S = 90.0
+
 
 class SlotState(str, Enum):
     READY = "ready"
@@ -45,11 +49,17 @@ class ProxySlot:
     last_error: str = ""
     total_ok: int = 0
     total_fail: int = 0
+    state_since: float = field(default_factory=time.time)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     def __post_init__(self) -> None:
         self.ready.set()
+
+    def set_state(self, st: SlotState) -> None:
+        if self.state != st:
+            self.state = st
+            self.state_since = time.time()
 
     def to_public(self) -> dict:
         return {
@@ -70,16 +80,26 @@ class ProxySlot:
             "total_fail": self.total_fail,
             "has_api_key": bool(self.api_key),
             "username": self.username[:3] + "***" if self.username else "",
+            "state_age_s": round(time.time() - self.state_since, 1),
         }
 
 
 class ProxyPool:
-    """Multi-proxy slot pool: lease → TTS → release / rotate on block."""
+    """
+    Multi-proxy slot pool for near-100% job success:
+
+      lease → TTS → release_ok
+                 → release_transient (retry same IP)
+                 → release_block_and_rotate (new exit IP, same job retries)
+
+    Auto-heal stuck ROTATING/DEAD so workers are never blocked forever.
+    """
 
     def __init__(self) -> None:
         self.slots: dict[str, ProxySlot] = {}
         self._lease_cond = asyncio.Condition()
         self._started = False
+        self._heal_task: Optional[asyncio.Task] = None
 
     def load(self) -> None:
         rows = load_proxies_file()
@@ -98,8 +118,23 @@ class ProxyPool:
                 port=int(r.get("port") or 8570),
             )
             if not slot.enabled:
-                slot.state = SlotState.DISABLED
+                slot.set_state(SlotState.DISABLED)
             self.slots[sid] = slot
+
+    def start_background(self) -> None:
+        """Optional periodic heal (called from worker manager)."""
+        if self._heal_task is None or self._heal_task.done():
+            self._heal_task = asyncio.create_task(self._heal_loop(), name="proxy-heal")
+
+    async def _heal_loop(self) -> None:
+        while True:
+            try:
+                n = await self.heal_stuck_slots()
+                if n:
+                    print(f"[proxy-pool] healed {n} stuck slot(s)", flush=True)
+            except Exception as e:
+                print(f"[proxy-pool] heal error: {e}", flush=True)
+            await asyncio.sleep(15.0)
 
     def save_config(self) -> None:
         rows = []
@@ -149,10 +184,9 @@ class ProxyPool:
                 or ("password" in data and data.get("password") is not None)
             )
             if not existing.enabled:
-                existing.state = SlotState.DISABLED
+                existing.set_state(SlotState.DISABLED)
             elif existing.state == SlotState.DISABLED or creds_changed:
-                # New credentials / re-enable: leave ROTATING/DEAD so workers can lease
-                existing.state = SlotState.READY
+                existing.set_state(SlotState.READY)
                 existing.proxy_url = ""
                 existing.exit_ip = ""
                 existing.fail_streak = 0
@@ -173,7 +207,7 @@ class ProxyPool:
                 port=int(data.get("port") or 8570),
             )
             if not slot.enabled:
-                slot.state = SlotState.DISABLED
+                slot.set_state(SlotState.DISABLED)
             self.slots[sid] = slot
         self.save_config()
         return slot
@@ -245,45 +279,132 @@ class ProxyPool:
                 return ""
 
     def rotate_sync(self, slot: ProxySlot) -> str:
-        """Change exit IP; respects provider cooldown."""
+        """
+        Change exit IP; respects provider cooldown.
+        Always ends READY if tunnel works, even when change-ip is rate-limited
+        (re-use current exit after wait so jobs are not stuck forever).
+        """
+        changed = False
         if slot.provider == "proxyxoay_net" and slot.api_key:
-            deadline = time.time() + 300
+            # shorter budget than before so heal/lease don't block 5 min
+            deadline = time.time() + 120
             while time.time() < deadline:
-                r = httpx.get(
-                    PROXYXOAY_CHANGE.format(key=slot.api_key), timeout=30.0
-                )
-                data = r.json()
-                msg = data.get("message") or ""
+                try:
+                    r = httpx.get(
+                        PROXYXOAY_CHANGE.format(key=slot.api_key), timeout=25.0
+                    )
+                    data = r.json()
+                except Exception as e:
+                    slot.last_error = f"change-ip: {e}"
+                    time.sleep(5)
+                    continue
+                msg = str(data.get("message") or "")
                 if data.get("status") == 200:
-                    time.sleep(4)
+                    time.sleep(3)
+                    changed = True
                     break
-                m = re.search(r"(\d+)\s*giây", msg) or re.search(r"(\d+)\s*s", msg)
-                wait = int(m.group(1)) + 2 if m else 15
-                wait = min(max(wait, 5), 90)
+                m = re.search(r"(\d+)\s*giây", msg) or re.search(
+                    r"(\d+)\s*(?:s|sec)", msg, re.I
+                )
+                wait = int(m.group(1)) + 2 if m else 12
+                wait = min(max(wait, 3), 60)
+                slot.last_error = f"change-ip wait {wait}s: {msg[:80]}"
                 time.sleep(wait)
-            else:
-                slot.last_error = "rotate timeout"
+            if not changed:
+                slot.last_error = (slot.last_error or "") + " | rotate soft-timeout"
+
         url = self.resolve_url_sync(slot)
-        exit_ip = self.probe_exit_sync(url)
+        exit_ip = self.probe_exit_sync(url, timeout=15.0)
         slot.exit_ip = exit_ip
         slot.ok_on_ip = 0
-        slot.fail_streak = 0
-        slot.cooldown_until = time.time() + 5  # brief settle
-        slot.state = SlotState.READY
-        slot.ready.set()
+        if exit_ip:
+            slot.fail_streak = 0
+            slot.cooldown_until = time.time() + 3
+            slot.set_state(SlotState.READY)
+            slot.ready.set()
+        else:
+            # tunnel dead — cool then retry later
+            slot.fail_streak += 1
+            slot.cooldown_until = time.time() + min(30 * slot.fail_streak, 120)
+            slot.set_state(
+                SlotState.DEAD if slot.fail_streak >= 8 else SlotState.COOLING
+            )
+            slot.ready.set()
+            slot.last_error = (slot.last_error or "") + " | probe empty after rotate"
         return url
 
-    async def ensure_url(self, slot: ProxySlot) -> str:
-        if slot.proxy_url:
+    async def ensure_url(self, slot: ProxySlot, force: bool = False) -> str:
+        if slot.proxy_url and not force:
             return slot.proxy_url
         return await asyncio.to_thread(self.resolve_url_sync, slot)
 
-    async def lease(self, timeout: float = 120.0) -> Optional[ProxySlot]:
-        """Wait for a READY slot under inflight limit."""
+    async def heal_stuck_slots(self) -> int:
+        """
+        Unstick ROTATING (timeout) and revive DEAD/COOLING past cooldown.
+        Returns number of slots healed.
+        """
+        healed = 0
+        now = time.time()
+        for slot in list(self.slots.values()):
+            if not slot.enabled:
+                continue
+            age = now - slot.state_since
+            # revive cooling
+            if slot.state == SlotState.COOLING and slot.cooldown_until <= now:
+                slot.set_state(SlotState.READY)
+                slot.ready.set()
+                healed += 1
+                continue
+            # revive dead after cooldown
+            if slot.state == SlotState.DEAD and age >= DEAD_COOLDOWN_S:
+                if slot.lock.locked():
+                    continue
+                try:
+                    async with slot.lock:
+                        slot.set_state(SlotState.ROTATING)
+                        slot.ready.clear()
+                        await asyncio.to_thread(self.rotate_sync, slot)
+                        healed += 1
+                except Exception as e:
+                    slot.last_error = f"heal dead: {e}"
+                    slot.set_state(SlotState.COOLING)
+                    slot.cooldown_until = now + 60
+                    slot.ready.set()
+                continue
+            # stuck rotating
+            if slot.state == SlotState.ROTATING and age >= ROTATING_STUCK_S:
+                if slot.lock.locked():
+                    continue
+                try:
+                    async with slot.lock:
+                        print(
+                            f"[proxy-pool] unstick {slot.id} rotating {age:.0f}s",
+                            flush=True,
+                        )
+                        await asyncio.to_thread(self.rotate_sync, slot)
+                        healed += 1
+                except Exception as e:
+                    slot.last_error = f"unstick: {e}"
+                    slot.set_state(SlotState.COOLING)
+                    slot.cooldown_until = now + 30
+                    slot.ready.set()
+                    healed += 1
+        if healed:
+            async with self._lease_cond:
+                self._lease_cond.notify_all()
+        return healed
+
+    async def lease(self, timeout: float = 60.0) -> Optional[ProxySlot]:
+        """Wait for a READY slot under inflight limit. Heals stuck slots while waiting."""
         settings = load_settings()
         max_inf = int(settings.get("inflight_per_proxy") or 3)
         deadline = time.time() + timeout
+        last_heal = 0.0
         while time.time() < deadline:
+            now = time.time()
+            if now - last_heal > 10:
+                await self.heal_stuck_slots()
+                last_heal = now
             async with self._lease_cond:
                 now = time.time()
                 candidates = []
@@ -295,25 +416,34 @@ class ProxyPool:
                     ):
                         continue
                     if s.cooldown_until > now:
-                        s.state = SlotState.COOLING
+                        if s.state != SlotState.COOLING:
+                            s.set_state(SlotState.COOLING)
                         continue
                     if s.state == SlotState.COOLING and s.cooldown_until <= now:
-                        s.state = SlotState.READY
+                        s.set_state(SlotState.READY)
                     if s.in_flight >= max_inf:
                         continue
                     if s.state not in (SlotState.READY, SlotState.BUSY):
                         continue
                     candidates.append(s)
-                # prefer fewer in_flight, then fewer ok_on_ip (spread load)
-                candidates.sort(key=lambda x: (x.in_flight, x.ok_on_ip, x.total_ok))
+                candidates.sort(key=lambda x: (x.in_flight, x.ok_on_ip, x.total_fail))
                 if candidates:
                     slot = candidates[0]
                     slot.in_flight += 1
-                    slot.state = SlotState.BUSY
-                    await self.ensure_url(slot)
+                    slot.set_state(SlotState.BUSY)
+                    try:
+                        await self.ensure_url(slot)
+                    except Exception as e:
+                        slot.last_error = str(e)[:200]
+                    if not slot.proxy_url:
+                        # cannot use — release and cool
+                        slot.in_flight = max(0, slot.in_flight - 1)
+                        slot.set_state(SlotState.COOLING)
+                        slot.cooldown_until = time.time() + 10
+                        continue
                     return slot
                 try:
-                    await asyncio.wait_for(self._lease_cond.wait(), timeout=2.0)
+                    await asyncio.wait_for(self._lease_cond.wait(), timeout=1.5)
                 except asyncio.TimeoutError:
                     pass
         return None
@@ -325,20 +455,25 @@ class ProxyPool:
             slot.total_ok += 1
             slot.fail_streak = 0
             if slot.state not in (SlotState.ROTATING, SlotState.DISABLED, SlotState.DEAD):
-                slot.state = SlotState.READY if slot.in_flight == 0 else SlotState.BUSY
+                slot.set_state(
+                    SlotState.READY if slot.in_flight == 0 else SlotState.BUSY
+                )
             self._lease_cond.notify_all()
 
     async def release_transient(self, slot: ProxySlot, err: str) -> None:
         async with self._lease_cond:
             slot.in_flight = max(0, slot.in_flight - 1)
             slot.total_fail += 1
+            slot.fail_streak += 1
             slot.last_error = err[:300]
             if slot.state not in (SlotState.ROTATING, SlotState.DISABLED, SlotState.DEAD):
-                slot.state = SlotState.READY if slot.in_flight == 0 else SlotState.BUSY
+                slot.set_state(
+                    SlotState.READY if slot.in_flight == 0 else SlotState.BUSY
+                )
             self._lease_cond.notify_all()
 
     async def release_block_and_rotate(self, slot: ProxySlot, err: str) -> None:
-        """Mark blocked; single-flight rotate this slot only."""
+        """Mark blocked; single-flight rotate this slot only. Always recovers state."""
         async with slot.lock:
             async with self._lease_cond:
                 slot.in_flight = max(0, slot.in_flight - 1)
@@ -346,17 +481,18 @@ class ProxyPool:
                 slot.fail_streak += 1
                 slot.last_error = err[:300]
                 if slot.state == SlotState.ROTATING:
-                    # peer already rotating
                     self._lease_cond.notify_all()
                     return
-                slot.state = SlotState.ROTATING
+                slot.set_state(SlotState.ROTATING)
                 slot.ready.clear()
             try:
                 await asyncio.to_thread(self.rotate_sync, slot)
             except Exception as e:
                 slot.last_error = f"rotate fail: {e}"
-                slot.state = SlotState.DEAD if slot.fail_streak >= 5 else SlotState.COOLING
-                slot.cooldown_until = time.time() + 60
+                slot.set_state(
+                    SlotState.DEAD if slot.fail_streak >= 8 else SlotState.COOLING
+                )
+                slot.cooldown_until = time.time() + 45
                 slot.ready.set()
             async with self._lease_cond:
                 self._lease_cond.notify_all()
@@ -366,15 +502,17 @@ class ProxyPool:
         if not slot:
             raise KeyError(sid)
         async with slot.lock:
-            slot.state = SlotState.ROTATING
+            slot.set_state(SlotState.ROTATING)
             slot.ready.clear()
             try:
                 await asyncio.to_thread(self.rotate_sync, slot)
             except Exception as e:
                 slot.last_error = str(e)
-                slot.state = SlotState.READY
+                slot.set_state(SlotState.READY)
                 slot.ready.set()
                 raise
+        async with self._lease_cond:
+            self._lease_cond.notify_all()
         return slot.to_public()
 
     def stats(self) -> dict:
