@@ -22,6 +22,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import accounts_store as accounts  # noqa: E402
+from ui.admin_panel import AdminPanel  # noqa: E402
 from ui.preview_tab import PreviewTab  # noqa: E402
 
 APP_NAME = "HuyViet Preview Studio"
@@ -90,7 +91,7 @@ class LoginDialog(QtWidgets.QDialog):
         self.user = None
         self.setWindowTitle("HuyViet Preview Studio - Đăng nhập")
         self.setModal(True)
-        self.setFixedSize(450, 520)
+        self.setFixedSize(450, 480)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint)
         self.setStyleSheet(
             """
@@ -152,7 +153,7 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addWidget(title)
         layout.addSpacing(6)
 
-        subtitle = QtWidgets.QLabel("Tool local · fast_tts preview · không server API")
+        subtitle = QtWidgets.QLabel("Đăng nhập để tiếp tục")
         subtitle.setStyleSheet("color: #737373; font-size: 12px;")
         subtitle.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(subtitle)
@@ -292,13 +293,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1260, 820)
         self.setMinimumSize(1040, 680)
         self.user = user
-        self._tab = PreviewTab(self, user, load_config, save_config)
-        self.setCentralWidget(self._tab)
-        self.setStyleSheet("QMainWindow { background: #f2f2f2; }")
+        self._tabs = QtWidgets.QTabWidget()
+        self._gen = PreviewTab(self, user, load_config, save_config)
+        self._tabs.addTab(self._gen, "Generate TTS")
+        if (user.get("role") or "") == "admin":
+            self._admin = AdminPanel(
+                self, user, on_changed=self._on_admin_changed
+            )
+            self._tabs.addTab(self._admin, "Quản trị")
+        self.setCentralWidget(self._tabs)
+        self.setStyleSheet(
+            """
+            QMainWindow { background: #f2f2f2; }
+            QTabWidget::pane { border: none; background: #f2f2f2; }
+            QTabBar::tab {
+                background: #e8e8e8; padding: 8px 16px; margin-right: 2px;
+                border-top-left-radius: 6px; border-top-right-radius: 6px;
+            }
+            QTabBar::tab:selected { background: #171717; color: #fff; }
+            """
+        )
+
+    def _on_admin_changed(self):
+        # refresh session user quotas/proxy after admin edit
+        full = accounts.get_account(self.user.get("id") or "")
+        if full:
+            self.user.clear()
+            self.user.update(full)
+            try:
+                self._gen.user = full
+                self._gen._refresh_account_badge()
+                # re-apply max workers cap from account
+                mw = min(5, max(1, int(full.get("max_workers") or 2)))
+                self._gen.sb_workers.setMaximum(mw)
+                if self._gen.sb_workers.value() > mw:
+                    self._gen.sb_workers.setValue(mw)
+            except Exception:
+                pass
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:
-            self._tab.cleanup()
+            self._gen.cleanup()
         except Exception:
             pass
         event.accept()

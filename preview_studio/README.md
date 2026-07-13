@@ -1,34 +1,31 @@
-# HuyViet Preview Studio (TOOL local)
+# HuyViet Preview Studio (tool local)
 
-Clone UI **OmniVoiceOnly**, **không** dùng tts-api server.
+Clone UI OmniVoice — **không** tts-api server.
 
-| | |
-|--|--|
-| Login | Account local (`accounts.json`) |
-| Proxy | Gắn **proxyxoay** theo từng account |
-| TTS | `fast_tts` (HSW + anonymous preview) trên máy |
-| Omni | Đã bỏ |
+## Login
+
+Chỉ **username / password** (không endpoint).
+
+Mặc định lần đầu: `admin` / `admin123` (role admin).
+
+## Tab Generate TTS
+
+- TXT / folder / SRT → chunk → `fast_tts` (HSW preview)
+- Proxy theo account
+- Luồng TTS **tối đa 5** (giới hạn theo gói account)
+
+## Tab Quản trị (admin only)
+
+| Tab | Chức năng |
+|-----|-----------|
+| **Account** | Tạo/sửa/xóa user, role, gói ký tự, max luồng (1–5), gán proxy |
+| **Proxy** | Pool proxyxoay (host/port/user/pass/api_key) |
+| **Gói ký tự** | 1M / 5M / 10M / 50M… tùy chỉnh |
 
 ## Chạy
 
 ```bash
-cd /Users/phamvanhuy/Downloads/tts-preview/preview_studio
+cd preview_studio
 pip3 install -r requirements.txt
-# cần camoufox + tls-client (đã có nếu từng chạy fast_tts)
 python3 PreviewStudio.py
 ```
-
-Lần đầu: user `admin` / pass `admin123` (đổi sau trong account).
-
-## Gắn proxyxoay
-
-1. ⚙ Cài đặt  
-2. Điền host / port / user / pass (và api_key nếu có)  
-3. **Lưu proxy cho account**  
-4. Chọn TXT → Bắt đầu  
-
-MP3 → thư mục `preview_studio/output/` (hoặc path bạn chọn).
-
-## Phụ thuộc repo
-
-Cần `fast_tts.py` ở thư mục cha (`tts-preview/`).

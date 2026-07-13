@@ -66,7 +66,7 @@ class BatchWorker(QThread):
         self.voice = voice
         self.lang = lang
         self.model = model
-        self.workers = max(1, min(6, int(workers or 1)))
+        self.workers = max(1, min(5, int(workers or 1)))
         self.hsw_workers = max(1, min(4, int(hsw_workers or 2)))
         self._stop = False
 
@@ -345,7 +345,8 @@ class PreviewTab(QtWidgets.QWidget):
         opt.addSpacing(8)
         opt.addWidget(QtWidgets.QLabel("Luồng TTS"))
         self.sb_workers = QtWidgets.QSpinBox()
-        self.sb_workers.setRange(1, 6)
+        # hard max 5; account may lower further in _refresh_account_badge
+        self.sb_workers.setRange(1, 5)
         self.sb_workers.setValue(2)
         opt.addWidget(self.sb_workers)
         opt.addWidget(QtWidgets.QLabel("HSW"))
@@ -485,19 +486,36 @@ class PreviewTab(QtWidgets.QWidget):
         self._cfg = c
 
     def _refresh_account_badge(self):
-        u = self.user.get("username") or "?"
+        pub = accounts.public_account(self.user)
+        u = pub.get("username") or "?"
         px = "có proxy" if accounts.build_proxy_url(self.user) else "CHƯA gắn proxy"
-        host = self.user.get("proxy_host") or "—"
-        self.lbl_login_status.setText(f"Account: {u} · {px}")
-        self.lbl_account.setText(f"Local · {u} · proxy={host} · {px}")
+        left = int(pub.get("chars_left") or 0)
+        quota = int(pub.get("char_quota") or 0)
+        used = int(pub.get("chars_used") or 0)
+        mw = min(5, max(1, int(pub.get("max_workers") or 2)))
+        self.sb_workers.setMaximum(mw)
+        if self.sb_workers.value() > mw:
+            self.sb_workers.setValue(mw)
+        host = self.user.get("proxy_host") or pub.get("proxy_host") or "—"
+        if self.user.get("proxy_id"):
+            p = accounts.get_proxy(self.user["proxy_id"])
+            if p:
+                host = p.get("host") or host
+        self.lbl_login_status.setText(
+            f"{u} · {px} · {used:,}/{quota:,} ký tự · max {mw} luồng"
+        )
+        self.lbl_account.setText(
+            f"{u} · gói còn {left:,} ký tự · max luồng {mw} · proxy={host}"
+        )
 
     def _open_settings(self):
         self.settings_dialog.show()
         self.settings_dialog.raise_()
 
     def _save_proxy(self):
+        """Save inline proxy on this account (or admin: use Quản trị tab for pool)."""
         try:
-            updated = accounts.update_account(
+            accounts.update_account(
                 self.user["id"],
                 proxy_provider="proxyxoay_net",
                 proxy_api_key=self.ed_px_key.text().strip(),
@@ -507,13 +525,12 @@ class PreviewTab(QtWidgets.QWidget):
                 proxy_port=self.ed_px_port.value(),
                 proxy_label=self.ed_px_label.text().strip(),
             )
-            # refresh session user secrets
             full = accounts.get_account(self.user["id"])
             if full:
                 self.user = full
             self._refresh_account_badge()
             self.lbl_settings_msg.setText(
-                f"✅ Đã lưu proxy cho account '{self.user.get('username')}' "
+                f"✅ Đã lưu proxy account '{self.user.get('username')}' "
                 f"→ {self.user.get('proxy_host')}:{self.user.get('proxy_port')}"
             )
         except Exception as e:
@@ -613,14 +630,27 @@ class PreviewTab(QtWidgets.QWidget):
         if not self._chunks:
             self._set_status("Chưa có chunk — chọn file trước.")
             return
+        # refresh account from disk
+        full = accounts.get_account(self.user.get("id") or "")
+        if full:
+            self.user = full
         proxy = accounts.build_proxy_url(self.user)
         if not proxy:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Thiếu proxy",
-                "Account chưa gắn proxyxoay.\nVào ⚙ Cài đặt → điền host/user/pass → Lưu.",
+                "Account chưa gắn proxyxoay.\n"
+                "Admin: tab Quản trị → Proxy + gán cho Account.\n"
+                "Hoặc ⚙ → điền proxy inline → Lưu.",
             )
             return
+        total_chars = sum(len(c.get("text") or "") for c in self._chunks)
+        ok_q, msg_q = accounts.check_chars(self.user, total_chars)
+        if not ok_q:
+            QtWidgets.QMessageBox.warning(self, "Hết gói ký tự", msg_q)
+            return
+        mw = min(5, max(1, int(self.user.get("max_workers") or 2)))
+        workers = min(self.sb_workers.value(), mw)
         self._persist_cfg()
         out = self.ed_output_dir.text().strip()
         if not out:
@@ -639,7 +669,7 @@ class PreviewTab(QtWidgets.QWidget):
             voice=self.ed_voice_id.text().strip() or DEFAULT_VOICE,
             lang=self.ed_lang.text().strip() or "en",
             model=DEFAULT_MODEL,
-            workers=self.sb_workers.value(),
+            workers=workers,
             hsw_workers=self.sb_hsw.value(),
         )
         self._batch.log.connect(self._set_status)
@@ -649,8 +679,8 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
         self._set_status(
-            f"Đang generate {len(self._chunks)} chunk qua proxy "
-            f"{self.user.get('proxy_host')}…"
+            f"Đang generate {len(self._chunks)} chunk · {workers} luồng · "
+            f"~{total_chars:,} ký tự…"
         )
 
     def _stop(self):
@@ -664,6 +694,13 @@ class PreviewTab(QtWidgets.QWidget):
     def _on_row_done(self, row: int, ok: bool, path: str, err: str):
         if ok:
             self._chunks[row]["path"] = path
+            # trừ gói ký tự
+            n = len(self._chunks[row].get("text") or "")
+            accounts.consume_chars(self.user.get("id") or "", n)
+            full = accounts.get_account(self.user.get("id") or "")
+            if full:
+                self.user = full
+                self._refresh_account_badge()
             item = QtWidgets.QTableWidgetItem("xong")
             item.setForeground(QtGui.QColor("#166534"))
             self.tbl_sub.setItem(row, 5, item)
