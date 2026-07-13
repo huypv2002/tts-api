@@ -1,15 +1,16 @@
-# HuyViet Preview Studio (desktop tool)
+# HuyViet Preview Studio (desktop tool LOCAL)
 
 GUI clone OmniVoice — **generate TTS local** (`fast_tts`).
 
-## Phân tách rõ
+## Phân tách (BẮT BUỘC)
 
-| | |
-|--|--|
-| **Admin web** | https://tts-origin.liveyt.pro/admin/ — account/API key, gói ký tự, max luồng ≤5, proxyxoay |
-| **Tool desktop** | `PreviewStudio.py` — login user/pass local, chọn file, generate MP3 |
+| Lớp | Nơi | Việc |
+|-----|-----|------|
+| **Tool local** | `preview_studio/` | Login local, generate MP3 trên máy |
+| **Web admin** | `cloudflare-admin/` (Workers + **D1**) | Account, gói ký tự, proxy, max luồng |
+| **Windows server** | `tts-api/` (optional) | Chỉ worker TTS nặng nếu scale — **không** là admin DB |
 
-**Không** quản lý account/proxy/gói trên desktop. Admin chỉ trên web.
+Xem `../ARCHITECTURE.md`.
 
 ## Login tool
 

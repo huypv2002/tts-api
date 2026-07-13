@@ -1,0 +1,13 @@
+{
+  "name": "tts-admin-web",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute tts-admin-db --remote --file=./schema.sql",
+    "db:local": "wrangler d1 execute tts-admin-db --local --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

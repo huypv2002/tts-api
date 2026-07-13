@@ -1,0 +1,70 @@
+-- Cloudflare D1 — TTS Admin (web only, not local tool DB)
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  token TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  expires_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS packages (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  chars INTEGER NOT NULL,
+  note TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS proxies (
+  id TEXT PRIMARY KEY,
+  label TEXT DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  provider TEXT DEFAULT 'proxyxoay_net',
+  api_key TEXT DEFAULT '',
+  username TEXT DEFAULT '',
+  password TEXT DEFAULT '',
+  host TEXT DEFAULT '',
+  port INTEGER DEFAULT 0,
+  note TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_salt TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  note TEXT DEFAULT '',
+  -- gói ký tự
+  package_id TEXT DEFAULT '',
+  package_name TEXT DEFAULT '',
+  char_quota INTEGER NOT NULL DEFAULT 1000000,
+  chars_used INTEGER NOT NULL DEFAULT 0,
+  -- max luồng 1–5
+  max_workers INTEGER NOT NULL DEFAULT 2,
+  -- proxy gắn account (inline hoặc proxy_id)
+  proxy_id TEXT DEFAULT '',
+  proxy_provider TEXT DEFAULT 'proxyxoay_net',
+  proxy_api_key TEXT DEFAULT '',
+  proxy_username TEXT DEFAULT '',
+  proxy_password TEXT DEFAULT '',
+  proxy_host TEXT DEFAULT '',
+  proxy_port INTEGER DEFAULT 0,
+  proxy_label TEXT DEFAULT '',
+  -- optional API key string for desktop/API clients
+  api_key_hash TEXT DEFAULT '',
+  api_key_prefix TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(username);
+CREATE INDEX IF NOT EXISTS idx_sessions_exp ON admin_sessions(expires_at);
+
+-- seed packages
+INSERT OR IGNORE INTO packages (id, name, chars, note, created_at) VALUES
+  ('pkg_1m',  'Gói 1 triệu',  1000000,  '1M chars', datetime('now')),
+  ('pkg_5m',  'Gói 5 triệu',  5000000,  '5M chars', datetime('now')),
+  ('pkg_10m', 'Gói 10 triệu', 10000000, '10M chars', datetime('now')),
+  ('pkg_50m', 'Gói 50 triệu', 50000000, '50M chars', datetime('now'));

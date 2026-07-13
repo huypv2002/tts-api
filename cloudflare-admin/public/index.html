@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTS Admin · Cloudflare D1</title>
+  <style>
+    :root { --bg:#070a12; --card:#121a2b; --line:rgba(140,170,220,.22); --text:#eef3ff; --muted:#8b9bb8; --acc:#6b8cff; --ok:#3dd68c; --bad:#ff6b8a; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 1.25rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+    .sub { color: var(--muted); font-size: .9rem; margin-bottom: 1rem; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; margin-bottom: 1rem; }
+    label { display:block; font-size:.75rem; color:var(--muted); margin-bottom:.25rem; }
+    input, select, button, textarea { font: inherit; }
+    input, select { width:100%; padding:.55rem .7rem; border-radius:8px; border:1px solid var(--line); background:#0b1220; color:var(--text); }
+    button { cursor:pointer; border:0; border-radius:10px; padding:.55rem 1rem; background:var(--acc); color:#fff; font-weight:600; }
+    button.ghost { background: transparent; border:1px solid var(--line); color:var(--text); }
+    button.danger { background: var(--bad); }
+    .row { display:grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap:.6rem; margin-bottom:.6rem; }
+    .actions { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.5rem; }
+    table { width:100%; border-collapse: collapse; font-size:.85rem; }
+    th, td { text-align:left; padding:.45rem .35rem; border-bottom:1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight:500; }
+    .mono { font-family: ui-monospace, monospace; font-size:.8rem; }
+    .err { color: var(--bad); font-size:.9rem; margin-top:.5rem; }
+    .ok { color: var(--ok); }
+    .hidden { display:none !important; }
+    #login { min-height: 100vh; display:grid; place-items:center; }
+    #login .card { width: min(400px, 92vw); }
+    nav { display:flex; gap:.4rem; flex-wrap:wrap; margin-bottom:1rem; }
+    nav button { background:#1a2438; }
+    nav button.active { background: var(--acc); }
+    .pill { display:inline-block; padding:.15rem .45rem; border-radius:999px; background:#1a2438; font-size:.75rem; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div id="login">
+    <div class="card">
+      <h1>TTS Admin · Cloudflare</h1>
+      <p class="sub">D1 database · không liên quan tool local / Windows server</p>
+      <label>Admin password</label>
+      <input id="pw" type="password" placeholder="30102002" />
+      <div class="actions"><button id="btn-login">Sign in</button></div>
+      <div class="err" id="login-err"></div>
+    </div>
+  </div>
+
+  <div id="app" class="wrap hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+      <div>
+        <h1>TTS Admin (D1)</h1>
+        <p class="sub" id="dash-sub">Cloudflare Workers + D1</p>
+      </div>
+      <button class="ghost" id="btn-logout">Logout</button>
+    </div>
+    <nav>
+      <button type="button" class="active" data-tab="accounts">Accounts</button>
+      <button type="button" data-tab="proxies">Proxies</button>
+      <button type="button" data-tab="packages">Gói ký tự</button>
+    </nav>
+    <div id="content"></div>
+  </div>
+
+  <script>
+    const state = { token: localStorage.getItem("tts_cf_admin") || "" };
+
+    async function api(path, opts = {}) {
+      const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+      if (state.token) {
+        headers["X-Admin-Token"] = state.token;
+        headers["Authorization"] = "Bearer " + state.token;
+      }
+      const res = await fetch("/api" + path, { ...opts, headers, credentials: "same-origin" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      return data;
+    }
+
+    function showLogin() {
+      document.getElementById("login").classList.remove("hidden");
+      document.getElementById("app").classList.add("hidden");
+    }
+    function showApp() {
+      document.getElementById("login").classList.add("hidden");
+      document.getElementById("app").classList.remove("hidden");
+    }
+
+    function fmtM(n) {
+      n = Number(n) || 0;
+      if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(n % 1e3 ? 1 : 0) + "K";
+      return String(n);
+    }
+
+    document.getElementById("btn-login").onclick = async () => {
+      const err = document.getElementById("login-err");
+      err.textContent = "";
+      try {
+        state.token = "";
+        localStorage.removeItem("tts_cf_admin");
+        const data = await api("/login", {
+          method: "POST",
+          body: JSON.stringify({ password: document.getElementById("pw").value }),
+        });
+        state.token = data.token;
+        localStorage.setItem("tts_cf_admin", data.token);
+        showApp();
+        await loadTab("accounts");
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    };
+
+    document.getElementById("btn-logout").onclick = async () => {
+      try { await api("/logout", { method: "POST" }); } catch (_) {}
+      state.token = "";
+      localStorage.removeItem("tts_cf_admin");
+      showLogin();
+    };
+
+    document.querySelectorAll("nav button").forEach((b) => {
+      b.onclick = () => {
+        document.querySelectorAll("nav button").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        loadTab(b.dataset.tab);
+      };
+    });
+
+    async function loadTab(tab) {
+      const root = document.getElementById("content");
+      root.innerHTML = "<p class='sub'>Loading…</p>";
+      try {
+        if (tab === "accounts") await renderAccounts(root);
+        else if (tab === "proxies") await renderProxies(root);
+        else if (tab === "packages") await renderPackages(root);
+        const d = await api("/dashboard");
+        document.getElementById("dash-sub").textContent =
+          `Accounts ${d.accounts} · Proxies ${d.proxies_ready} · D1 (not local tool)`;
+      } catch (e) {
+        if (/auth|expired|401/i.test(e.message)) {
+          showLogin();
+          return;
+        }
+        root.innerHTML = `<p class="err">${e.message}</p>`;
+      }
+    }
+
+    async function renderAccounts(root) {
+      const [acc, pkgs, pxs] = await Promise.all([
+        api("/accounts"),
+        api("/packages"),
+        api("/proxies"),
+      ]);
+      const pkgOpts = (pkgs.packages || [])
+        .map((p) => `<option value="${p.id}">${p.name} (${fmtM(p.chars)})</option>`)
+        .join("");
+      const pxOpts = (pxs.proxies || [])
+        .filter((p) => p.enabled)
+        .map((p) => `<option value="${p.id}">${p.label || p.id} (${p.host}:${p.port})</option>`)
+        .join("");
+
+      root.innerHTML = `
+        <div class="card">
+          <h3>Tạo account</h3>
+          <div class="row">
+            <div><label>Username</label><input id="a-user" /></div>
+            <div><label>Password</label><input id="a-pass" type="password" /></div>
+            <div><label>Role</label><select id="a-role"><option value="user">user</option><option value="admin">admin</option></select></div>
+            <div><label>Gói ký tự</label><select id="a-pkg"><option value="">—</option>${pkgOpts}</select></div>
+            <div><label>Max luồng (1–5)</label><input id="a-mw" type="number" min="1" max="5" value="3" /></div>
+            <div><label>Proxy pool</label><select id="a-px"><option value="">—</option>${pxOpts}</select></div>
+          </div>
+          <div class="actions"><button id="a-create">Tạo account</button></div>
+          <div id="a-new" class="ok" style="margin-top:.5rem"></div>
+        </div>
+        <div class="card">
+          <h3>Accounts</h3>
+          <table>
+            <thead><tr>
+              <th>User</th><th>Role</th><th>Gói</th><th>Used / Quota</th><th>Luồng</th><th>Proxy</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${(acc.accounts || []).map((a) => `
+                <tr data-id="${a.id}">
+                  <td>${a.username}</td>
+                  <td>${a.role}</td>
+                  <td>${a.package_name || "—"}</td>
+                  <td>${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}</td>
+                  <td>
+                    <input type="number" min="1" max="5" value="${a.max_workers}" data-f="max_workers" style="width:60px" />
+                  </td>
+                  <td class="mono">${a.has_proxy ? (a.proxy_host || a.proxy_id || "yes") : "—"}</td>
+                  <td>
+                    <button class="ghost" data-act="save">Save</button>
+                    <button class="ghost" data-act="reset">Reset used</button>
+                    <button class="danger" data-act="del">Xóa</button>
+                  </td>
+                </tr>`).join("") || `<tr><td colspan="7" class="sub">Chưa có account</td></tr>`}
+            </tbody>
+          </table>
+        </div>`;
+
+      document.getElementById("a-create").onclick = async () => {
+        try {
+          const body = {
+            username: document.getElementById("a-user").value.trim(),
+            password: document.getElementById("a-pass").value,
+            role: document.getElementById("a-role").value,
+            package_id: document.getElementById("a-pkg").value,
+            max_workers: +document.getElementById("a-mw").value || 2,
+            proxy_id: document.getElementById("a-px").value,
+          };
+          const res = await api("/accounts", { method: "POST", body: JSON.stringify(body) });
+          document.getElementById("a-new").textContent =
+            `OK ${res.username} · api_key=${res.api_key} (copy ngay) · gói ${fmtM(res.char_quota)} · max ${res.max_workers} luồng`;
+          await loadTab("accounts");
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+
+      root.querySelectorAll("tr[data-id]").forEach((tr) => {
+        const id = tr.dataset.id;
+        tr.querySelector('[data-act="save"]').onclick = async () => {
+          const mw = +tr.querySelector('[data-f="max_workers"]').value || 2;
+          await api("/accounts/" + id, {
+            method: "PATCH",
+            body: JSON.stringify({ max_workers: Math.min(5, Math.max(1, mw)) }),
+          });
+          await loadTab("accounts");
+        };
+        tr.querySelector('[data-act="reset"]').onclick = async () => {
+          await api("/accounts/" + id, { method: "PATCH", body: JSON.stringify({ chars_used: 0 }) });
+          await loadTab("accounts");
+        };
+        tr.querySelector('[data-act="del"]').onclick = async () => {
+          if (!confirm("Xóa account?")) return;
+          await api("/accounts/" + id, { method: "DELETE" });
+          await loadTab("accounts");
+        };
+      });
+    }
+
+    async function renderProxies(root) {
+      const data = await api("/proxies");
+      root.innerHTML = `
+        <div class="card">
+          <h3>Thêm / sửa proxyxoay</h3>
+          <div class="row">
+            <div><label>ID</label><input id="p-id" placeholder="auto" /></div>
+            <div><label>Label</label><input id="p-label" /></div>
+            <div><label>API key</label><input id="p-key" /></div>
+            <div><label>Username</label><input id="p-user" /></div>
+            <div><label>Password</label><input id="p-pass" type="password" /></div>
+            <div><label>Host</label><input id="p-host" placeholder="vipvn7.proxyxoay.net" /></div>
+            <div><label>Port</label><input id="p-port" type="number" value="8978" /></div>
+          </div>
+          <div class="actions"><button id="p-save">Lưu proxy</button></div>
+        </div>
+        <div class="card">
+          <h3>Proxy pool</h3>
+          <table>
+            <thead><tr><th>ID</th><th>Label</th><th>Host</th><th>User</th><th>On</th><th></th></tr></thead>
+            <tbody>
+              ${(data.proxies || []).map((p) => `
+                <tr>
+                  <td class="mono">${p.id}</td>
+                  <td>${p.label || ""}</td>
+                  <td class="mono">${p.host}:${p.port}</td>
+                  <td>${p.username || ""}</td>
+                  <td>${p.enabled ? "yes" : "no"}</td>
+                  <td><button class="danger" data-del="${p.id}">Xóa</button></td>
+                </tr>`).join("") || `<tr><td colspan="6" class="sub">Trống</td></tr>`}
+            </tbody>
+          </table>
+        </div>`;
+      document.getElementById("p-save").onclick = async () => {
+        await api("/proxies", {
+          method: "POST",
+          body: JSON.stringify({
+            id: document.getElementById("p-id").value.trim() || undefined,
+            label: document.getElementById("p-label").value.trim(),
+            api_key: document.getElementById("p-key").value.trim(),
+            username: document.getElementById("p-user").value.trim(),
+            password: document.getElementById("p-pass").value,
+            host: document.getElementById("p-host").value.trim(),
+            port: +document.getElementById("p-port").value || 8978,
+            enabled: true,
+          }),
+        });
+        await loadTab("proxies");
+      };
+      root.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("Xóa proxy?")) return;
+          await api("/proxies/" + b.dataset.del, { method: "DELETE" });
+          await loadTab("proxies");
+        };
+      });
+    }
+
+    async function renderPackages(root) {
+      const data = await api("/packages");
+      root.innerHTML = `
+        <div class="card">
+          <h3>Gói ký tự (triệu)</h3>
+          <div class="row">
+            <div><label>Tên</label><input id="g-name" placeholder="Gói 20 triệu" /></div>
+            <div><label>Số ký tự</label><input id="g-chars" type="number" value="20000000" step="1000000" /></div>
+          </div>
+          <div class="actions"><button id="g-save">Thêm gói</button></div>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>ID</th><th>Tên</th><th>Ký tự</th><th></th></tr></thead>
+            <tbody>
+              ${(data.packages || []).map((p) => `
+                <tr>
+                  <td class="mono">${p.id}</td>
+                  <td>${p.name}</td>
+                  <td>${fmtM(p.chars)} (${Number(p.chars).toLocaleString()})</td>
+                  <td><button class="danger" data-del="${p.id}">Xóa</button></td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>`;
+      document.getElementById("g-save").onclick = async () => {
+        await api("/packages", {
+          method: "POST",
+          body: JSON.stringify({
+            name: document.getElementById("g-name").value.trim(),
+            chars: +document.getElementById("g-chars").value || 1000000,
+          }),
+        });
+        await loadTab("packages");
+      };
+      root.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          await api("/packages/" + b.dataset.del, { method: "DELETE" });
+          await loadTab("packages");
+        };
+      });
+    }
+
+    // boot
+    (async () => {
+      if (!state.token) {
+        showLogin();
+        return;
+      }
+      try {
+        await api("/dashboard");
+        showApp();
+        await loadTab("accounts");
+      } catch {
+        state.token = "";
+        localStorage.removeItem("tts_cf_admin");
+        showLogin();
+      }
+    })();
+  </script>
+</body>
+</html>
