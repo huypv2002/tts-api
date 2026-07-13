@@ -161,15 +161,28 @@ async def create_key(
         max_concurrent=body.max_concurrent,
         note=body.note,
     )
+    raw = row.get("raw_key")
+    proxy_fields = {
+        k: v
+        for k, v in body.model_dump(exclude_none=True).items()
+        if k.startswith("proxy_")
+    }
+    if proxy_fields:
+        updated = await db.update_api_key(row["id"], **proxy_fields)
+        if updated:
+            row = updated
     return {
         "id": row["id"],
         "name": row["name"],
-        "key": row["raw_key"],
+        "key": raw,
         "key_prefix": row["key_prefix"],
         "max_chars": row["max_chars"],
         "quota_chars_day": row["quota_chars_day"],
         "quota_jobs_day": row["quota_jobs_day"],
         "max_concurrent": row["max_concurrent"],
+        "proxy_host": row.get("proxy_host") or "",
+        "proxy_port": row.get("proxy_port") or 0,
+        "has_proxy": bool(row.get("proxy_host") and row.get("proxy_username")),
         "note": "Save the key now — it will not be shown again.",
     }
 

@@ -27,6 +27,14 @@ class ApiKeyCreate(BaseModel):
     quota_jobs_day: Optional[int] = None
     max_concurrent: Optional[int] = None
     note: str = ""
+    # optional dedicated proxyxoay line for this account/key
+    proxy_provider: Optional[str] = "proxyxoay_net"
+    proxy_api_key: Optional[str] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_label: Optional[str] = None
 
 
 class ApiKeyUpdate(BaseModel):
@@ -37,6 +45,13 @@ class ApiKeyUpdate(BaseModel):
     quota_jobs_day: Optional[int] = None
     max_concurrent: Optional[int] = None
     note: Optional[str] = None
+    proxy_provider: Optional[str] = None
+    proxy_api_key: Optional[str] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_label: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):

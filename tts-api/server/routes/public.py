@@ -195,6 +195,7 @@ async def job_audio(
 @router.get("/me")
 async def me(key: dict = Depends(require_api_key), db: Database = Depends(get_db)):
     key = await db.get_api_key(key["id"]) or key
+    has_proxy = bool(key.get("proxy_host") and key.get("proxy_username"))
     return {
         "id": key["id"],
         "name": key["name"],
@@ -206,4 +207,11 @@ async def me(key: dict = Depends(require_api_key), db: Database = Depends(get_db
         "max_concurrent": key["max_concurrent"],
         "total_chars": key["total_chars"],
         "total_jobs": key["total_jobs"],
+        "has_proxy": has_proxy,
+        "proxy_host": key.get("proxy_host") or "",
+        "proxy_port": key.get("proxy_port") or 0,
+        "proxy_label": key.get("proxy_label") or "",
+        "proxy_username": (key.get("proxy_username") or "")[:3] + "***"
+        if key.get("proxy_username")
+        else "",
     }

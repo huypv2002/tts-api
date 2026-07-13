@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 from ..config import AUDIO_DIR, PARENT, load_settings
 from ..db import Database
-from .proxy_pool import pool
+from .proxy_pool import ProxySlot, SlotState, pool
 
 # IP / edge blocks — must rotate exit IP then retry SAME job
 BLOCK_MARKERS = (
@@ -202,6 +202,35 @@ class WorkerManager:
                 print(f"[worker {wid}] loop error: {e}", flush=True)
                 await asyncio.sleep(0.5)
 
+    async def _lease_dedicated(self, key_row: dict) -> ProxySlot:
+        """Build a one-off ProxySlot from api_key proxyxoay binding."""
+        host = (key_row.get("proxy_host") or "").strip()
+        port = int(key_row.get("proxy_port") or 0)
+        user = (key_row.get("proxy_username") or "").strip()
+        pw = (key_row.get("proxy_password") or "").strip()
+        api_key = (key_row.get("proxy_api_key") or "").strip()
+        if not host or not port or not user:
+            raise RuntimeError("incomplete dedicated proxy on api key")
+        slot = ProxySlot(
+            id=f"key{key_row['id']}",
+            label=key_row.get("proxy_label") or f"account-{key_row.get('name')}",
+            enabled=True,
+            provider=key_row.get("proxy_provider") or "proxyxoay_net",
+            api_key=api_key,
+            username=user,
+            password=pw,
+            host=host,
+            port=port,
+        )
+        if api_key:
+            await asyncio.to_thread(pool.resolve_url_sync, slot)
+        else:
+            slot.proxy_url = pool._build_url(slot)
+        if not slot.proxy_url:
+            slot.proxy_url = f"http://{user}:{pw}@{host}:{port}"
+        slot.set_state(SlotState.BUSY)
+        return slot
+
     async def _run_job(self, wid: int, job: dict) -> None:
         settings = self._settings()
         jid = job["id"]
@@ -219,13 +248,35 @@ class WorkerManager:
 
         attempt = 0
         soft_on_slot = 0  # consecutive soft fails without rotate
+        dedicated = False
+        key_row = None
+        if job.get("api_key_id"):
+            try:
+                key_row = await self.db.get_api_key(int(job["api_key_id"]))
+            except Exception:
+                key_row = None
 
         while attempt < max_attempts and (time.time() - t0) < max_seconds:
             if self._stop.is_set():
                 return
             attempt += 1
 
-            slot = await pool.lease(timeout=lease_timeout)
+            slot = None
+            dedicated = False
+            # Prefer account-bound proxyxoay (API key binding)
+            if key_row and key_row.get("proxy_host") and key_row.get("proxy_username"):
+                try:
+                    slot = await self._lease_dedicated(key_row)
+                    dedicated = True
+                except Exception as e:
+                    print(
+                        f"[W{wid}] dedicated proxy fail: {e} — fallback pool",
+                        flush=True,
+                    )
+                    slot = None
+                    dedicated = False
+            if slot is None:
+                slot = await pool.lease(timeout=lease_timeout)
             if not slot:
                 # Do NOT fail the job — heal + wait for proxy to come back
                 await pool.heal_stuck_slots()
@@ -263,7 +314,10 @@ class WorkerManager:
                     text, token, slot.proxy_url, voice, model, lang, speed
                 )
                 out.write_bytes(audio)
-                await pool.release_ok(slot)
+                if dedicated:
+                    pass  # dedicated slot not in pool
+                else:
+                    await pool.release_ok(slot)
                 await self.db.update_job(
                     jid,
                     status="done",
@@ -295,15 +349,29 @@ class WorkerManager:
                     flush=True,
                 )
 
+                async def _release_soft(msg: str) -> None:
+                    if dedicated:
+                        return
+                    await pool.release_transient(slot, msg)
+
+                async def _release_rotate(msg: str) -> None:
+                    if dedicated:
+                        # rotate dedicated proxyxoay line via provider API
+                        try:
+                            await asyncio.to_thread(pool.rotate_sync, slot)
+                        except Exception as re:
+                            print(f"[W{wid}] dedicated rotate: {re}", flush=True)
+                        return
+                    await pool.release_block_and_rotate(slot, msg)
+
                 if "isMobile" in err or "setDefaultViewport" in err:
                     err_short = (
                         "Camoufox/Playwright viewport bug (isMobile). "
                         "On Windows: fix_playwright.bat then restart | "
                         f"{err_short[:120]}"
                     )
-                    await pool.release_transient(slot, err_short)
+                    await _release_soft(err_short)
                     await self.db.update_job(jid, error=err_short, proxy_id=slot.id)
-                    # retry a few times in case farm recovers; then fail
                     if attempt >= 3:
                         await self.db.update_job(
                             jid,
@@ -318,7 +386,7 @@ class WorkerManager:
                     continue
 
                 if _is_fatal(e):
-                    await pool.release_transient(slot, err_short)
+                    await _release_soft(err_short)
                     await self.db.update_job(
                         jid,
                         status="failed",
@@ -333,7 +401,7 @@ class WorkerManager:
                 # ── block / captcha / 401 → rotate IP, retry SAME job ──
                 if _is_block(e):
                     soft_on_slot = 0
-                    await pool.release_block_and_rotate(slot, err_short)
+                    await _release_rotate(err_short)
                     await self.db.update_job(
                         jid,
                         error=f"block→rotate a{attempt}: {err_short[:180]}",
@@ -346,12 +414,9 @@ class WorkerManager:
                 # ── transient network ──
                 if _is_transient(e):
                     soft_on_slot += 1
-                    # After 2 soft fails on a row → rotate (IP/tunnel may be dead)
                     if soft_on_slot >= 2:
                         soft_on_slot = 0
-                        await pool.release_block_and_rotate(
-                            slot, f"transient×2→rotate: {err_short}"
-                        )
+                        await _release_rotate(f"transient×2→rotate: {err_short}")
                         await self.db.update_job(
                             jid,
                             error=f"transient→rotate a{attempt}: {err_short[:160]}",
@@ -359,7 +424,7 @@ class WorkerManager:
                             attempts=attempt,
                         )
                     else:
-                        await pool.release_transient(slot, err_short)
+                        await _release_soft(err_short)
                         await self.db.update_job(
                             jid,
                             error=f"transient a{attempt}: {err_short[:160]}",
@@ -371,9 +436,7 @@ class WorkerManager:
 
                 # ── unknown: assume risk → rotate + retry (do not drop job) ──
                 soft_on_slot = 0
-                await pool.release_block_and_rotate(
-                    slot, f"unknown→rotate: {err_short}"
-                )
+                await _release_rotate(f"unknown→rotate: {err_short}")
                 await self.db.update_job(
                     jid,
                     error=f"retry a{attempt}: {err_short[:180]}",

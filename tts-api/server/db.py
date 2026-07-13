@@ -114,7 +114,28 @@ class Database:
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(SCHEMA)
         await self._conn.commit()
+        await self._migrate()
         await self._bootstrap()
+
+    async def _migrate(self) -> None:
+        """Additive schema upgrades (SQLite)."""
+        cur = await self.conn.execute("PRAGMA table_info(api_keys)")
+        cols = {row[1] for row in await cur.fetchall()}
+        alters = [
+            ("proxy_provider", "TEXT DEFAULT 'proxyxoay_net'"),
+            ("proxy_api_key", "TEXT DEFAULT ''"),
+            ("proxy_username", "TEXT DEFAULT ''"),
+            ("proxy_password", "TEXT DEFAULT ''"),
+            ("proxy_host", "TEXT DEFAULT ''"),
+            ("proxy_port", "INTEGER DEFAULT 0"),
+            ("proxy_label", "TEXT DEFAULT ''"),
+        ]
+        for name, decl in alters:
+            if name not in cols:
+                await self.conn.execute(
+                    f"ALTER TABLE api_keys ADD COLUMN {name} {decl}"
+                )
+        await self.conn.commit()
 
     async def close(self) -> None:
         if self._conn:
@@ -223,6 +244,13 @@ class Database:
             "quota_jobs_day",
             "max_concurrent",
             "note",
+            "proxy_provider",
+            "proxy_api_key",
+            "proxy_username",
+            "proxy_password",
+            "proxy_host",
+            "proxy_port",
+            "proxy_label",
         }
         sets = []
         vals = []
