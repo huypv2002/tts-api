@@ -341,13 +341,8 @@ class HswFarm:
         except Exception:
             pass
 
-    async def _inject(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
-        if slot.js_key == cache_key:
-            try:
-                if await slot.page.evaluate("typeof hsw === 'function'"):
-                    return
-            except Exception:
-                pass
+    async def _inject_fresh(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
+        """Single inject on a page that does not already have hsw()."""
         injected = False
         try:
             await slot.page.add_script_tag(content=hsw_js)
@@ -361,6 +356,24 @@ class HswFarm:
                 raise RuntimeError("hsw function not available after inject")
         slot.js_key = cache_key
 
+    async def _inject(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
+        # Reuse only if same hsw.js already on page (single inject).
+        if slot.js_key == cache_key:
+            try:
+                if await slot.page.evaluate("typeof hsw === 'function'"):
+                    return
+            except Exception:
+                pass
+        # Different key or broken page → new page (never double-inject).
+        try:
+            already = await slot.page.evaluate("typeof hsw === 'function'")
+        except Exception:
+            already = False
+        if already or slot.js_key is not None:
+            await self._recycle_page(slot, hsw_js, cache_key)
+            return
+        await self._inject_fresh(slot, hsw_js, cache_key)
+
     async def _recycle_page(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
         """Replace a dead/leaky page; keep the rest of the farm warm."""
         try:
@@ -373,7 +386,7 @@ class HswFarm:
         slot.js_key = None
         slot.solves = 0
         slot.alive = True
-        await self._inject(slot, hsw_js, cache_key)
+        await self._inject_fresh(slot, hsw_js, cache_key)
 
     async def solve(self, req_token: str, proxy_http: str | None = None) -> str:
         """Run hsw(req). proxy_http only used for hsw.js download + via_proxy mode."""
@@ -431,21 +444,16 @@ class HswFarm:
             await self._free.put(slot)
 
     async def warm(self, proxy_http: str | None = None) -> None:
-        """Pre-launch farm + inject current hsw.js so first job is fast."""
+        """
+        Pre-launch Camoufox pages only.
+
+        KHÔNG pre-inject hsw.js: inject sớm (materials/HSW của warm) làm
+        proof getcaptcha bị reject (trả lại c.type=hsw). Inject đúng lúc
+        solve với req thật của job.
+        """
         try:
-            req, _, _ = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
-            cache_key, hsw_js = await asyncio.to_thread(_fetch_hsw_js, req, proxy_http)
             await self.start(proxy_http)
-            assert self._free is not None
-            # inject on every page so all K are ready
-            for _ in range(self.size):
-                slot = await self._free.get()
-                try:
-                    async with slot.lock:
-                        await self._inject(slot, hsw_js, cache_key)
-                finally:
-                    await self._free.put(slot)
-            log(f"  [warm] HSW farm ready size={self.size}")
+            log(f"  [warm] HSW farm ready size={self.size} (browser only, no inject)")
         except Exception as e:
             log(f"  [warm] skip: {e}")
 
@@ -654,7 +662,7 @@ async def _new_page_strip_ismobile(browser):
 def submit_captcha(
     hsw_token: str, version: str, config: dict, proxy_http: str | None
 ) -> str:
-    """getcaptcha → generated_pass_UUID."""
+    """getcaptcha → generated_pass_UUID (logic cũ: 1 lần, không multi-round)."""
     t0 = time.time()
     session = _tls_session(proxy_http)
     motion = {
@@ -675,11 +683,17 @@ def submit_captcha(
         "c": json.dumps(config["c"]),
     }
     resp = session.post(f"https://api2.hcaptcha.com/getcaptcha/{SITEKEY}", data=data)
-    result = resp.json()
+    try:
+        result = resp.json()
+    except Exception:
+        raise RuntimeError(f"getcaptcha non-json: {resp.text[:200]}")
 
     if "generated_pass_UUID" in result:
         token = result["generated_pass_UUID"]
-        log(f"  [3/4] token OK ({time.time()-t0:.1f}s) prefix={token[:28]}... len={len(token)}")
+        log(
+            f"  [3/4] token OK ({time.time()-t0:.1f}s) "
+            f"prefix={token[:28]}... len={len(token)}"
+        )
         return token
     if "tasklist" in result:
         raise RuntimeError("image_challenge — proxy/IP needs visual captcha")
@@ -714,14 +728,26 @@ async def call_tts(
     model_id: str,
     language_code: str,
     speed: float,
+    stability: float = 0.5,
+    similarity_boost: float = 0.75,
 ) -> bytes:
     """POST anonymous stream endpoint (httpx, same proxy as token)."""
     t0 = time.time()
     url = f"{API_BASE}/v1/text-to-speech/{voice_id}/stream/with-timestamps/anonymous"
+    # clamp voice_settings like ElevenLabs client ranges
+    speed = max(0.7, min(1.2, float(speed or 1.0)))
+    stability = max(0.0, min(1.0, float(stability if stability is not None else 0.5)))
+    similarity_boost = max(
+        0.0, min(1.0, float(similarity_boost if similarity_boost is not None else 0.75))
+    )
     payload = {
         "text": text,
         "model_id": model_id,
-        "voice_settings": {"speed": speed, "stability": 0.5, "similarity_boost": 0.75},
+        "voice_settings": {
+            "speed": speed,
+            "stability": stability,
+            "similarity_boost": similarity_boost,
+        },
         "hcaptcha_token": hcaptcha_token,
         "language_code": language_code,
     }
@@ -745,14 +771,28 @@ async def call_tts(
             return resp.content
         raise RuntimeError("200 but no audio_base64")
 
-    body = resp.text[:400]
+    body = (resp.text or "")[:500]
+    if resp.status_code == 401:
+        low = body.lower()
+        if "landing page" in low or "sign_in_required" in low or "limit of available" in low:
+            raise RuntimeError(
+                "TTS_LANDING_LIMIT: IP này đã hết lượt free landing page. "
+                "Cần đổi IP proxy và chờ trước khi gen tiếp. "
+                f"chi tiết={body[:180]}"
+            )
+        raise RuntimeError(
+            f"TTS HTTP 401 (token/IP bị từ chối — cần token mới hoặc đổi IP proxy): {body}"
+        )
+    if resp.status_code == 429:
+        raise RuntimeError(f"TTS HTTP 429 (quá nhiều request — chậm lại): {body}")
     raise RuntimeError(f"TTS HTTP {resp.status_code}: {body}")
 
 
 async def solve_token(proxy_http: str | None) -> str:
     """
-    Full captcha token (on-demand).
-    materials + getcaptcha via proxy; HSW via farm (default no browser proxy).
+    Full captcha token (on-demand) — logic cũ:
+    materials + getcaptcha qua proxy; HSW qua farm (default no browser proxy).
+    1 vòng HSW → getcaptcha; fail thì raise (retry/đổi IP ở pipeline).
     """
     t0 = time.time()
     req, version, config = await asyncio.to_thread(get_hcaptcha_materials, proxy_http)
@@ -769,23 +809,29 @@ async def warm_hsw(proxy_http: str | None = None) -> None:
 
 
 class TokenRecord:
-    """One captcha token ↔ one TTS call. No TTL — only gen/proxy validity."""
+    """
+    One captcha token ↔ one TTS call on THE SAME proxy exit.
+    materials + getcaptcha + call_tts MUST all use rec.proxy.
+    """
 
     __slots__ = ("token", "proxy", "gen")
 
     def __init__(self, token: str, proxy: str | None, gen: int):
         self.token = token
-        self.proxy = proxy
+        self.proxy = proxy  # exact URL used when solving captcha
         self.gen = gen
 
 
 class TokenPool:
     """
-    1 token = 1 TTS call. Không quan tâm TTL.
+    1 token = 1 TTS call trên ĐÚNG proxy lúc solve.
 
-    refillers giữ queue sẵn ≈ target (= số TTS workers) để worker không chờ.
-    take() lấy đúng 1 token cho 1 call_tts.
-    Chỉ vứt token khi rotate proxy (gen đổi) — không drop vì “hết hạn”.
+    Nối đuôi + SONG SONG với TTS:
+      • Refiller mint với self.proxy; TokenRecord.proxy gắn vĩnh viễn
+      • take() → (token, proxy) — caller PHẢI call_tts(token, proxy đó)
+      • Đổi IP → gen++ + drop queue (token IP cũ không tái dùng)
+
+    Chỉ vứt token khi rotate proxy (gen đổi).
     """
 
     def __init__(
@@ -797,7 +843,7 @@ class TokenPool:
         **_ignored,  # accept legacy ttl=… without error
     ):
         self.proxy = proxy
-        # target = số token sẵn ≈ số TTS call song song (không phải TTL buffer)
+        # target = số token sẵn trong pool (buffer nối đuôi)
         self.target = max(1, target)
         self.refillers = max(
             1, refillers if refillers is not None else min(self.target, 3)
@@ -806,8 +852,11 @@ class TokenPool:
         self.gen = 0
         self._q: asyncio.Queue[TokenRecord] = asyncio.Queue()
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()  # take() / TTS → wake refill ngay
+        self._wake_epoch = 0  # chống miss wakeup khi clear+wait
         self._tasks: list[asyncio.Task] = []
         self._lock = asyncio.Lock()
+        self._inflight = 0  # số mint đang chạy (đặt chỗ)
         self.stats = {
             "produced": 0,
             "consumed": 0,
@@ -820,6 +869,23 @@ class TokenPool:
     def ready(self) -> int:
         return self._q.qsize()
 
+    @property
+    def inflight(self) -> int:
+        return self._inflight
+
+    def _need_more(self) -> bool:
+        """Còn slot trống? (ready + đang mint < target)."""
+        return (self.ready + self._inflight) < self.target
+
+    def _kick(self) -> None:
+        """Đánh thức refiller (sau take / đang TTS / mint xong / đổi proxy)."""
+        self._wake_epoch += 1
+        self._wake.set()
+
+    def kick_refill(self) -> None:
+        """Public: gọi khi bắt đầu TTS để mint chạy song song I/O TTS."""
+        self._kick()
+
     async def start(self) -> None:
         if self._tasks:
             return
@@ -827,17 +893,19 @@ class TokenPool:
             self.farm = await get_hsw_farm()
             await self.farm.start(self.proxy)
         self._stop.clear()
+        self._kick()  # warm: mint ngay lên target
         for i in range(self.refillers):
             self._tasks.append(
                 asyncio.create_task(self._refill_loop(i + 1), name=f"token-refill-{i+1}")
             )
         log(
-            f"  [token-pool] start 1token=1tts target={self.target} "
+            f"  [token-pool] start nối-đuôi∥TTS target={self.target} "
             f"refillers={self.refillers} proxy={'yes' if self.proxy else 'direct'}"
         )
 
     async def stop(self) -> None:
         self._stop.set()
+        self._kick()
         for t in self._tasks:
             t.cancel()
         if self._tasks:
@@ -858,53 +926,107 @@ class TokenPool:
         return n
 
     async def on_proxy_changed(self, proxy: str | None, reason: str = "") -> None:
-        """Rotate IP → vứt token cũ (cùng exit IP mới mới dùng được)."""
+        """Rotate IP → vứt token cũ; kick mint lại trên IP mới."""
         async with self._lock:
             self.proxy = proxy
             self.gen += 1
             dropped = await self._drain()
+            # inflight mints sẽ discard vì gen lệch
         log(
             f"  [token-pool] invalidate gen={self.gen} dropped={dropped} "
             f"reason={reason or 'proxy-change'}"
         )
+        self._kick()
 
     def _usable(self, rec: TokenRecord) -> bool:
-        return rec.gen == self.gen and rec.proxy == self.proxy
+        # Token chỉ hợp lệ nếu gen + proxy URL khớp pool hiện tại
+        return (
+            rec.gen == self.gen
+            and bool(rec.token)
+            and (rec.proxy or None) == (self.proxy or None)
+        )
 
-    async def take(self, timeout: float = 90.0) -> str:
-        """Lấy đúng 1 token cho 1 TTS. Chờ refillers; hết timeout → mint on-demand."""
+    def _proxy_host(self, proxy: str | None) -> str:
+        if not proxy:
+            return "direct"
+        return proxy.split("@")[-1]
+
+    async def take(self, timeout: float = 90.0) -> tuple[str, str | None]:
+        """
+        Lấy 1 token + proxy URL đã dùng khi solve.
+        Caller MUST: call_tts(text, token, proxy) — không được đổi proxy.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 rec = self._q.get_nowait()
             except asyncio.QueueEmpty:
+                self._kick()
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     break
                 try:
                     rec = await asyncio.wait_for(
-                        self._q.get(), timeout=min(0.5, remaining)
+                        self._q.get(), timeout=min(0.4, remaining)
                     )
                 except asyncio.TimeoutError:
                     continue
 
             if not self._usable(rec):
                 self.stats["stale"] += 1
+                self._kick()
                 continue
             self.stats["consumed"] += 1
-            log(f"  [token-pool] take → tts ready={self.ready}/{self.target}")
-            return rec.token
+            # Nối đuôi: vừa lấy 1 → mint bù ngay (∥ TTS phía sau)
+            self._kick()
+            log(
+                f"  [token-pool] take → ready={self.ready}/{self.target} "
+                f"inflight={self._inflight} "
+                f"bind={self._proxy_host(rec.proxy)} (token⇄proxy)"
+            )
+            return rec.token, rec.proxy
 
-        log("  [token-pool] starve → on-demand 1 token for 1 tts")
-        return await solve_token(self.proxy)
+        # Starve: solve on-demand trên ĐÚNG self.proxy hiện tại
+        log("  [token-pool] starve → on-demand 1 token trên proxy pool")
+        self._kick()
+        async with self._lock:
+            px = self.proxy
+            gen = self.gen
+        token = await solve_token(px)
+        # Nếu vừa rotate trong lúc solve → token có thể stale; caller retry
+        if gen != self.gen or px != self.proxy:
+            raise RuntimeError(
+                "token solved nhưng proxy đã rotate — thử lại (token⇄proxy)"
+            )
+        return token, px
+
+    async def _try_reserve(self) -> bool:
+        """Đặt chỗ 1 mint nếu còn slot. Atomic với ready+inflight."""
+        async with self._lock:
+            if (self.ready + self._inflight) >= self.target:
+                return False
+            self._inflight += 1
+            return True
+
+    async def _release_reserve(self) -> None:
+        async with self._lock:
+            self._inflight = max(0, self._inflight - 1)
 
     async def _mint_one(self, rid: int) -> TokenRecord | None:
-        """Mint đúng 1 token (1 TTS)."""
+        """
+        Mint 1 token trên snapshot proxy (materials + getcaptcha cùng IP).
+        HSW farm no-proxy (compute); HTTP captcha bám proxy.
+        """
         async with self._lock:
             proxy = self.proxy
             gen = self.gen
+        if not proxy:
+            log(f"  [token-pool R{rid}] skip mint — no proxy bound")
+            await asyncio.sleep(0.5)
+            return None
         try:
             t0 = time.time()
+            # Cùng proxy cho materials + getcaptcha (= IP sẽ dùng cho TTS)
             req, version, config = await asyncio.to_thread(
                 get_hcaptcha_materials, proxy
             )
@@ -916,39 +1038,74 @@ class TokenPool:
             token = await asyncio.to_thread(
                 submit_captcha, hsw, version, config, proxy
             )
-            if gen != self.gen:
+            if gen != self.gen or proxy != self.proxy:
                 return None
+            # Gắn cứng proxy lúc solve — TTS phải dùng đúng URL này
             rec = TokenRecord(token, proxy, gen)
             self.stats["produced"] += 1
             log(
-                f"  [token-pool R{rid}] +1 token ({time.time()-t0:.1f}s) "
-                f"ready≈{self.ready + 1}/{self.target}"
+                f"  [token-pool R{rid}] +1 ({time.time()-t0:.1f}s) "
+                f"ready≈{self.ready + 1}/{self.target} "
+                f"bind={self._proxy_host(proxy)} ∥tts"
             )
             return rec
         except Exception as e:
             self.stats["errors"] += 1
             log(f"  [token-pool R{rid}] mint fail: {type(e).__name__}: {e}"[:160])
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(0.5)
             return None
 
+    async def _wait_slot(self) -> None:
+        """Chờ pool còn chỗ trống hoặc bị kick (không miss wakeup)."""
+        while not self._need_more() and not self._stop.is_set():
+            ep = self._wake_epoch
+            self._wake.clear()
+            # kick xảy ra giữa check và clear?
+            if self._wake_epoch != ep or self._need_more() or self._stop.is_set():
+                return
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=0.2)
+            except asyncio.TimeoutError:
+                pass
+
     async def _refill_loop(self, rid: int) -> None:
-        """Giữ sẵn ~target token (= số TTS song song). Mỗi token = 1 call TTS."""
+        """
+        Background mint — chạy song song với call_tts.
+        take()/kick_refill() đánh thức ngay khi có slot trống.
+        """
         while not self._stop.is_set():
             try:
-                if self.ready >= self.target:
-                    await asyncio.sleep(0.1)
+                if not self._need_more():
+                    await self._wait_slot()
                     continue
-                rec = await self._mint_one(rid)
+
+                if not await self._try_reserve():
+                    # refiller khác vừa đặt chỗ hết slot
+                    await asyncio.sleep(0.03)
+                    continue
+
+                try:
+                    rec = await self._mint_one(rid)
+                finally:
+                    await self._release_reserve()
+
                 if rec is None:
-                    await asyncio.sleep(0.15)
+                    self._kick()
+                    await asyncio.sleep(0.12)
                     continue
+
                 await self._q.put(rec)
+                # yield ngay để TTS / refiller khác xen kẽ
+                await asyncio.sleep(0)
+                if self._need_more():
+                    self._kick()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self.stats["errors"] += 1
                 log(f"  [token-pool R{rid}] loop: {e}"[:140])
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.6)
+                self._kick()
 
 
 # proxyxoay.net rotating residential API
@@ -1057,6 +1214,192 @@ def proxyxoay_net_change_ip(key: str) -> None:
     time.sleep(3)  # docs: đợi vài giây
 
 
+def parse_proxyhttp(raw: str) -> str:
+    """
+    Parse proxyxoay.shop proxyhttp field → http:// URL.
+    Forms: host:port | host:port:: | host:port:user:pass
+    """
+    s = (raw or "").strip()
+    if not s:
+        raise RuntimeError("empty proxyhttp")
+    if "://" in s:
+        return normalize_proxy(s) or s
+    # strip trailing empty segments from "ip:port::"
+    while s.endswith(":"):
+        s = s[:-1]
+    parts = s.split(":")
+    if len(parts) < 2:
+        raise RuntimeError(f"bad proxyhttp: {raw!r}")
+    host, port = parts[0], parts[1]
+    if not host or not port:
+        raise RuntimeError(f"bad proxyhttp host/port: {raw!r}")
+    if len(parts) >= 4:
+        user = parts[2]
+        password = ":".join(parts[3:])
+        if user or password:
+            return f"http://{user}:{password}@{host}:{port}"
+    return f"http://{host}:{port}"
+
+
+def proxyxoay_shop_get(
+    key: str,
+    *,
+    nhamang: str = "random",
+    tinhthanh: str | int = 0,
+    whitelist: str = "",
+    method: str = "GET",
+) -> dict:
+    """
+    proxyxoay.shop rotating get.
+    GET/POST https://proxyxoay.shop/api/get.php
+    success status=100 → proxyhttp / proxysocks5
+    error status=101 / 102
+    """
+    key = (key or "").strip()
+    if not key:
+        raise RuntimeError("proxyxoay.shop key empty")
+    params = {
+        "key": key,
+        "nhamang": (nhamang or "random").strip() or "random",
+        "tinhthanh": str(tinhthanh if tinhthanh is not None else 0),
+        "whitelist": whitelist or "",
+    }
+    m = (method or "GET").upper()
+    if m == "POST":
+        r = httpx.post(PROXYXOAY_SHOP_API, data=params, timeout=25.0)
+    else:
+        r = httpx.get(PROXYXOAY_SHOP_API, params=params, timeout=25.0)
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(f"proxyxoay.shop non-json: {r.text[:200]}") from None
+    st = data.get("status")
+    if st != 100:
+        raise RuntimeError(
+            f"proxyxoay.shop status={st}: {data.get('message') or data}"
+        )
+    return data
+
+
+def proxyxoay_shop_from_key(
+    key: str,
+    *,
+    nhamang: str = "random",
+    tinhthanh: str | int = 0,
+    whitelist: str = "",
+    method: str = "GET",
+) -> str:
+    """get.php → HTTP proxy URL."""
+    data = proxyxoay_shop_get(
+        key,
+        nhamang=nhamang,
+        tinhthanh=tinhthanh,
+        whitelist=whitelist,
+        method=method,
+    )
+    raw = str(data.get("proxyhttp") or "")
+    url = parse_proxyhttp(raw)
+    log(
+        f"  [proxyxoay.shop] {data.get('Nha Mang') or '?'} / "
+        f"{data.get('Vi Tri') or '?'} → {url.split('@')[-1]} "
+        f"msg={str(data.get('message') or '')[:60]}"
+    )
+    return url
+
+
+def detect_proxy_provider(provider: str | None = None, host: str | None = None) -> str:
+    """Return 'proxyxoay_net' | 'proxyxoay_shop' | 'static'."""
+    p = (provider or "").strip().lower()
+    h = (host or "").strip().lower()
+    if "shop" in p or "proxyxoay.shop" in h:
+        return "proxyxoay_shop"
+    if "net" in p or "proxyxoay.net" in h or "vipvn" in h:
+        return "proxyxoay_net"
+    if p in ("static", "http", "manual"):
+        return "static"
+    # default net rotating (current product default)
+    if p:
+        return p if p.startswith("proxyxoay") else "proxyxoay_net"
+    return "proxyxoay_net" if h else "static"
+
+
+def resolve_proxy_line(line: dict) -> str:
+    """
+    Resolve one proxy line dict → http:// URL.
+    line keys: provider, api_key, host, port, username, password,
+               shop_nhamang, shop_tinhthanh, shop_whitelist, shop_method, url
+    """
+    if line.get("url"):
+        return normalize_proxy(str(line["url"])) or str(line["url"])
+    provider = detect_proxy_provider(line.get("provider"), line.get("host"))
+    key = (line.get("api_key") or "").strip()
+    host = (line.get("host") or "").strip()
+    port = int(line.get("port") or 0)
+    user = (line.get("username") or "").strip()
+    pw = (line.get("password") or "").strip()
+
+    if provider == "proxyxoay_shop" and key:
+        return proxyxoay_shop_from_key(
+            key,
+            nhamang=line.get("shop_nhamang") or line.get("nhamang") or "random",
+            tinhthanh=line.get("shop_tinhthanh")
+            if line.get("shop_tinhthanh") is not None
+            else line.get("tinhthanh", 0),
+            whitelist=line.get("shop_whitelist") or line.get("whitelist") or "",
+            method=line.get("shop_method") or "GET",
+        )
+    if provider == "proxyxoay_net" and key:
+        try:
+            return proxyxoay_net_from_status(key)
+        except Exception as e:
+            log(f"  [proxyxoay.net] status fail, try static creds: {e}")
+    # static host:port
+    if host and port:
+        if user and pw:
+            return f"http://{user}:{pw}@{host}:{port}"
+        return f"http://{host}:{port}"
+    if key:
+        # last resort: try both providers
+        try:
+            return proxyxoay_net_from_status(key)
+        except Exception:
+            return proxyxoay_shop_from_key(key)
+    raise RuntimeError(f"cannot resolve proxy line id={line.get('id')}")
+
+
+def rotate_proxy_line(line: dict) -> str:
+    """
+    Change IP for one line → new http:// URL.
+    - proxyxoay_net: change-key-ip + key-status
+    - proxyxoay_shop: get.php again (new exit)
+    - static: return same URL (caller may sleep)
+    """
+    provider = detect_proxy_provider(line.get("provider"), line.get("host"))
+    key = (line.get("api_key") or "").strip()
+    if provider == "proxyxoay_shop" and key:
+        url = proxyxoay_shop_from_key(
+            key,
+            nhamang=line.get("shop_nhamang") or line.get("nhamang") or "random",
+            tinhthanh=line.get("shop_tinhthanh")
+            if line.get("shop_tinhthanh") is not None
+            else line.get("tinhthanh", 0),
+            whitelist=line.get("shop_whitelist") or line.get("whitelist") or "",
+            method=line.get("shop_method") or "GET",
+        )
+        line["url"] = url
+        return url
+    if provider == "proxyxoay_net" and key:
+        proxyxoay_net_change_ip(key)
+        url = proxyxoay_net_from_status(key)
+        line["url"] = url
+        # refresh host/port hints if present in status path
+        return url
+    # static — no rotate API
+    url = resolve_proxy_line(line)
+    line["url"] = url
+    return url
+
+
 def fetch_proxyxoay(key: str | None = None, change_ip: bool = False) -> str:
     """
     Resolve residential rotating proxy URL.
@@ -1086,16 +1429,9 @@ def fetch_proxyxoay(key: str | None = None, change_ip: bool = False) -> str:
     except Exception as e_net:
         log(f"  [proxyxoay.net] status fail: {e_net}")
 
-    # legacy shop API (old keys only)
-    url = f"{PROXYXOAY_SHOP_API}?key={key}&nhamang=random&tinhthanh=0&whitelist="
+    # legacy shop API (old keys)
     try:
-        r = httpx.get(url, timeout=15.0)
-        data = r.json()
-        if data.get("status") == 100:
-            raw = str(data["proxyhttp"]).rstrip(":")
-            log(f"  [proxyxoay.shop] got {raw}")
-            return normalize_proxy(raw)  # type: ignore
-        log(f"  [proxyxoay.shop] {data}")
+        return proxyxoay_shop_from_key(key)
     except Exception as e:
         log(f"  [proxyxoay.shop] {e}")
 
