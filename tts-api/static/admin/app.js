@@ -188,7 +188,7 @@ function badge(status) {
 
 async function renderOverview(root) {
   const d = await api("/dashboard");
-  const st = (d.usage && d.usage.jobs_by_status) || {};
+  const st = (d && d.usage && d.usage.jobs_by_status) || {};
   const px = d.proxy || {};
   const settings = d.settings || {};
   const queued = (st.queued || 0) + (st.running || 0);
@@ -510,27 +510,41 @@ async function renderProxies(root) {
   root.innerHTML = `
     <div class="panel">
       <h3>Add / update proxy</h3>
+      <p class="muted">proxyxoay.net (rotating host) hoặc proxyxoay.shop (get.php key).</p>
       <div class="grid-2">
         <div class="field"><label>ID</label><input id="p-id" placeholder="px1" /></div>
-        <div class="field"><label>Label</label><input id="p-label" placeholder="EU #1" /></div>
+        <div class="field"><label>Label</label><input id="p-label" placeholder="EU #1 / Shop FPT" /></div>
         <div class="field"><label>Provider</label>
-          <select id="p-provider"><option value="proxyxoay_net">proxyxoay_net</option><option value="static">static</option></select>
+          <select id="p-provider">
+            <option value="proxyxoay_net">proxyxoay.net</option>
+            <option value="proxyxoay_shop">proxyxoay.shop</option>
+            <option value="static">static</option>
+          </select>
         </div>
         <div class="field"><label>Enabled</label>
           <select id="p-en"><option value="1">Yes</option><option value="0">No</option></select>
         </div>
-        <div class="field"><label>API key (proxyxoay)</label><input id="p-key" /></div>
-        <div class="field"><label>Host</label><input id="p-host" /></div>
-        <div class="field"><label>Port</label><input id="p-port" type="number" value="8570" /></div>
-        <div class="field"><label>Username</label><input id="p-user" /></div>
-        <div class="field"><label>Password</label><input id="p-pass" type="password" /></div>
+        <div class="field"><label>API key</label><input id="p-key" placeholder="proxyxoay key" /></div>
+        <div class="field" data-net-only><label>Host</label><input id="p-host" placeholder="vipvn7.proxyxoay.net" value="vipvn7.proxyxoay.net" /></div>
+        <div class="field" data-net-only><label>Port</label><input id="p-port" type="number" value="8570" /></div>
+        <div class="field" data-net-only><label>Username</label><input id="p-user" /></div>
+        <div class="field" data-net-only><label>Password</label><input id="p-pass" type="password" /></div>
+        <div class="field" data-shop-only style="display:none"><label>Nhà mạng</label>
+          <input id="p-nhamang" value="random" placeholder="random / viettel / fpt…" />
+        </div>
+        <div class="field" data-shop-only style="display:none"><label>Tỉnh thành</label>
+          <input id="p-tinh" value="0" placeholder="0 = random" />
+        </div>
+        <div class="field" data-shop-only style="display:none"><label>Whitelist IPv4</label>
+          <input id="p-wl" placeholder="tuỳ chọn" />
+        </div>
       </div>
       <button class="primary" id="p-save" type="button">Save proxy</button>
     </div>
     <div class="panel">
       <h3>Pool (${data.stats.ready}/${data.stats.total} ready)</h3>
       <table>
-        <thead><tr><th>ID</th><th>Label</th><th>State</th><th>Exit</th><th>In flight</th><th>OK/IP</th><th>Error</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Label</th><th>Provider</th><th>State</th><th>Exit</th><th>In flight</th><th>OK/IP</th><th>Error</th><th></th></tr></thead>
         <tbody>
           ${(data.proxies || [])
             .map(
@@ -538,6 +552,7 @@ async function renderProxies(root) {
             <tr>
               <td class="mono">${esc(p.id)}</td>
               <td>${esc(p.label)}</td>
+              <td>${esc((p.provider || "net").replace("proxyxoay_", ""))}</td>
               <td>${badge(p.state)}</td>
               <td class="mono">${esc(p.exit_ip || "—")}</td>
               <td>${p.in_flight}</td>
@@ -549,28 +564,49 @@ async function renderProxies(root) {
               </td>
             </tr>`
             )
-            .join("") || `<tr><td colspan="8" class="muted">Empty — add proxies above</td></tr>`}
+            .join("") || `<tr><td colspan="9" class="muted">Empty — add proxies above</td></tr>`}
         </tbody>
       </table>
     </div>
   `;
+
+  // Toggle net/shop fields based on provider
+  const syncProv = () => {
+    const prov = $("#p-provider").value || "";
+    const isShop = prov.includes("shop");
+    const isNet = prov.includes("net");
+    root.querySelectorAll("[data-net-only]").forEach((el) => {
+      el.style.display = isNet ? "" : "none";
+    });
+    root.querySelectorAll("[data-shop-only]").forEach((el) => {
+      el.style.display = isShop ? "" : "none";
+    });
+  };
+  $("#p-provider").onchange = syncProv;
+  syncProv();
+
   $("#p-save").onclick = async () => {
     try {
+      const provider = $("#p-provider").value;
       await api("/proxies", {
         method: "POST",
         body: JSON.stringify({
           id: $("#p-id").value || undefined,
           label: $("#p-label").value,
-          provider: $("#p-provider").value,
+          provider: provider,
           enabled: $("#p-en").value === "1",
           api_key: $("#p-key").value,
-          host: $("#p-host").value,
-          port: +$("#p-port").value || 8570,
-          username: $("#p-user").value,
-          password: $("#p-pass").value,
+          host: $("#p-host") ? $("#p-host").value : "",
+          port: $("#p-port") ? +$("#p-port").value || 8570 : 0,
+          username: $("#p-user") ? $("#p-user").value : "",
+          password: $("#p-pass") ? $("#p-pass").value : "",
+          shop_nhamang: $("#p-nhamang") ? $("#p-nhamang").value.trim() : "random",
+          shop_tinhthanh: $("#p-tinh") ? +$("#p-tinh").value || 0 : 0,
+          shop_whitelist: $("#p-wl") ? $("#p-wl").value.trim() : "",
+          shop_method: "GET",
         }),
       });
-      toast("Proxy saved");
+      toast("Proxy saved · " + provider);
       navigate("proxies");
     } catch (e) {
       toast(e.message);

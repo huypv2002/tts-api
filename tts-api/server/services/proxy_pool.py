@@ -39,6 +39,11 @@ class ProxySlot:
     password: str
     host: str
     port: int
+    # proxyxoay.shop fields
+    shop_nhamang: str = "random"
+    shop_tinhthanh: int = 0
+    shop_whitelist: str = ""
+    shop_method: str = "GET"
     state: SlotState = SlotState.READY
     proxy_url: str = ""
     exit_ip: str = ""
@@ -81,6 +86,10 @@ class ProxySlot:
             "has_api_key": bool(self.api_key),
             "username": self.username[:3] + "***" if self.username else "",
             "state_age_s": round(time.time() - self.state_since, 1),
+            "shop_nhamang": self.shop_nhamang,
+            "shop_tinhthanh": self.shop_tinhthanh,
+            "shop_whitelist": self.shop_whitelist,
+            "shop_method": self.shop_method,
         }
 
 
@@ -116,6 +125,10 @@ class ProxyPool:
                 password=(r.get("password") or "").strip(),
                 host=(r.get("host") or "").strip(),
                 port=int(r.get("port") or 8570),
+                shop_nhamang=r.get("shop_nhamang") or "random",
+                shop_tinhthanh=int(r.get("shop_tinhthanh") or 0),
+                shop_whitelist=r.get("shop_whitelist") or "",
+                shop_method=r.get("shop_method") or "GET",
             )
             if not slot.enabled:
                 slot.set_state(SlotState.DISABLED)
@@ -150,6 +163,10 @@ class ProxyPool:
                     "password": s.password,
                     "host": s.host,
                     "port": s.port,
+                    "shop_nhamang": s.shop_nhamang,
+                    "shop_tinhthanh": s.shop_tinhthanh,
+                    "shop_whitelist": s.shop_whitelist,
+                    "shop_method": s.shop_method,
                 }
             )
         save_proxies_file(rows)
@@ -173,9 +190,18 @@ class ProxyPool:
                 "password",
                 "host",
                 "port",
+                "shop_nhamang",
+                "shop_tinhthanh",
+                "shop_whitelist",
+                "shop_method",
             ):
                 if k in data and data[k] is not None:
-                    setattr(existing, k, data[k] if k != "port" else int(data[k]))
+                    if k == "port":
+                        setattr(existing, k, int(data[k]))
+                    elif k == "shop_tinhthanh":
+                        setattr(existing, k, int(data[k]))
+                    else:
+                        setattr(existing, k, data[k])
             creds_changed = (
                 existing.host != prev_host
                 or int(existing.port) != int(prev_port)
@@ -205,6 +231,10 @@ class ProxyPool:
                 password=(data.get("password") or "").strip(),
                 host=(data.get("host") or "").strip(),
                 port=int(data.get("port") or 8570),
+                shop_nhamang=data.get("shop_nhamang") or "random",
+                shop_tinhthanh=int(data.get("shop_tinhthanh") or 0),
+                shop_whitelist=data.get("shop_whitelist") or "",
+                shop_method=data.get("shop_method") or "GET",
             )
             if not slot.enabled:
                 slot.set_state(SlotState.DISABLED)
@@ -255,6 +285,36 @@ class ProxyPool:
                             slot.password = pw
             except Exception as e:
                 slot.last_error = f"status: {e}"
+        elif slot.provider == "proxyxoay_shop" and slot.api_key:
+            # proxyxoay.shop: gọi get.php để lấy proxy URL mới
+            try:
+                from fast_tts import proxyxoay_shop_from_key
+                url = proxyxoay_shop_from_key(
+                    slot.api_key,
+                    nhamang=slot.shop_nhamang or "random",
+                    tinhthanh=slot.shop_tinhthanh or 0,
+                    whitelist=slot.shop_whitelist or "",
+                    method=slot.shop_method or "GET",
+                )
+                # Parse URL để extract host/port/username/password
+                # URL format: http://user:pass@host:port
+                if url.startswith("http://"):
+                    url = url[7:]
+                if "@" in url:
+                    auth, hostport = url.rsplit("@", 1)
+                    if ":" in auth:
+                        slot.username, slot.password = auth.split(":", 1)
+                else:
+                    hostport = url
+                if ":" in hostport:
+                    h, p = hostport.rsplit(":", 1)
+                    slot.host = h
+                    try:
+                        slot.port = int(p)
+                    except ValueError:
+                        pass
+            except Exception as e:
+                slot.last_error = f"shop: {e}"
         url = self._build_url(slot)
         slot.proxy_url = url
         return url
@@ -312,6 +372,10 @@ class ProxyPool:
                 time.sleep(wait)
             if not changed:
                 slot.last_error = (slot.last_error or "") + " | rotate soft-timeout"
+        elif slot.provider == "proxyxoay_shop" and slot.api_key:
+            # proxyxoay.shop: mỗi lần gọi get.php = 1 IP mới (không cần change-ip)
+            # resolve_url_sync sẽ tự gọi get.php để lấy URL mới
+            changed = True
 
         url = self.resolve_url_sync(slot)
         exit_ip = self.probe_exit_sync(url, timeout=15.0)

@@ -209,18 +209,26 @@ class WorkerManager:
         user = (key_row.get("proxy_username") or "").strip()
         pw = (key_row.get("proxy_password") or "").strip()
         api_key = (key_row.get("proxy_api_key") or "").strip()
-        if not host or not port or not user:
+        provider = key_row.get("proxy_provider") or "proxyxoay_net"
+        # For shop provider, host/port/user may not be set (resolved dynamically)
+        if provider != "proxyxoay_shop" and (not host or not port or not user):
             raise RuntimeError("incomplete dedicated proxy on api key")
+        if provider == "proxyxoay_shop" and not api_key:
+            raise RuntimeError("shop dedicated proxy requires proxy_api_key")
         slot = ProxySlot(
             id=f"key{key_row['id']}",
             label=key_row.get("proxy_label") or f"account-{key_row.get('name')}",
             enabled=True,
-            provider=key_row.get("proxy_provider") or "proxyxoay_net",
+            provider=provider,
             api_key=api_key,
             username=user,
             password=pw,
             host=host,
             port=port,
+            shop_nhamang=key_row.get("proxy_shop_nhamang") or "random",
+            shop_tinhthanh=int(key_row.get("proxy_shop_tinhthanh") or 0),
+            shop_whitelist=key_row.get("proxy_shop_whitelist") or "",
+            shop_method=key_row.get("proxy_shop_method") or "GET",
         )
         if api_key:
             await asyncio.to_thread(pool.resolve_url_sync, slot)
@@ -264,7 +272,11 @@ class WorkerManager:
             slot = None
             dedicated = False
             # Prefer account-bound proxyxoay (API key binding)
-            if key_row and key_row.get("proxy_host") and key_row.get("proxy_username"):
+            has_dedicated_proxy = key_row and (
+                (key_row.get("proxy_host") and key_row.get("proxy_username"))
+                or (key_row.get("proxy_provider") == "proxyxoay_shop" and key_row.get("proxy_api_key"))
+            )
+            if has_dedicated_proxy:
                 try:
                     slot = await self._lease_dedicated(key_row)
                     dedicated = True

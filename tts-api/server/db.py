@@ -129,6 +129,10 @@ class Database:
             ("proxy_host", "TEXT DEFAULT ''"),
             ("proxy_port", "INTEGER DEFAULT 0"),
             ("proxy_label", "TEXT DEFAULT ''"),
+            ("proxy_shop_nhamang", "TEXT DEFAULT 'random'"),
+            ("proxy_shop_tinhthanh", "INTEGER DEFAULT 0"),
+            ("proxy_shop_whitelist", "TEXT DEFAULT ''"),
+            ("proxy_shop_method", "TEXT DEFAULT 'GET'"),
         ]
         for name, decl in alters:
             if name not in cols:
@@ -251,6 +255,10 @@ class Database:
             "proxy_host",
             "proxy_port",
             "proxy_label",
+            "proxy_shop_nhamang",
+            "proxy_shop_tinhthanh",
+            "proxy_shop_whitelist",
+            "proxy_shop_method",
         }
         sets = []
         vals = []
@@ -260,6 +268,8 @@ class Database:
             if k == "max_concurrent" and v is not None:
                 v = max(1, min(5, int(v)))
             if k == "proxy_port" and v is not None:
+                v = int(v)
+            if k == "proxy_shop_tinhthanh" and v is not None:
                 v = int(v)
             sets.append(f"{k} = ?")
             vals.append(v)

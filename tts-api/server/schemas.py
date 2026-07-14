@@ -35,6 +35,11 @@ class ApiKeyCreate(BaseModel):
     proxy_host: Optional[str] = None
     proxy_port: Optional[int] = None
     proxy_label: Optional[str] = None
+    # proxyxoay.shop fields for dedicated proxy
+    proxy_shop_nhamang: Optional[str] = "random"
+    proxy_shop_tinhthanh: Optional[int] = 0
+    proxy_shop_whitelist: Optional[str] = ""
+    proxy_shop_method: Optional[str] = "GET"
 
 
 class ApiKeyUpdate(BaseModel):
@@ -52,6 +57,11 @@ class ApiKeyUpdate(BaseModel):
     proxy_host: Optional[str] = None
     proxy_port: Optional[int] = None
     proxy_label: Optional[str] = None
+    # proxyxoay.shop fields for dedicated proxy
+    proxy_shop_nhamang: Optional[str] = None
+    proxy_shop_tinhthanh: Optional[int] = None
+    proxy_shop_whitelist: Optional[str] = None
+    proxy_shop_method: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -81,3 +91,8 @@ class ProxyUpsert(BaseModel):
     password: str = ""
     host: str = ""
     port: int = 8570
+    # proxyxoay.shop fields
+    shop_nhamang: Optional[str] = "random"
+    shop_tinhthanh: Optional[int] = 0
+    shop_whitelist: Optional[str] = ""
+    shop_method: Optional[str] = "GET"
