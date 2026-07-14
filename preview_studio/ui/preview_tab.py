@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -14,36 +14,113 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QHeaderView
 
 import accounts_store as accounts
-from local_tts import synthesize_one_sync
+from gen_pipeline import run_jobs
+from local_tts import fetch_voice_info
+from output_layout import (
+    append_silence_to_mp3,
+    build_chunks_from_sources,
+    doan_path,
+    merge_doan_mp3s,
+    smart_split_text,
+)
 
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
 DEFAULT_MODEL = "eleven_v3"
+CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
+PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
+
+# Silent MP3 files for pause between chunks/punctuation
+_STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SILENT_05S_PATH = os.path.join(_STUDIO_DIR, "silent_05s.mp3")
+SILENT_1S_PATH = os.path.join(_STUDIO_DIR, "silent_1s.mp3")
 
 
 def split_chunks(text: str, max_chars: int) -> List[str]:
-    text = re.sub(r"\s+", " ", (text or "").strip())
-    if not text:
-        return []
-    if len(text) <= max_chars:
-        return [text]
-    words = text.split(" ")
-    out: List[str] = []
-    cur: List[str] = []
-    for w in words:
-        trial = (" ".join(cur + [w])).strip()
-        if len(trial) > max_chars and cur:
-            out.append(" ".join(cur))
-            cur = [w]
-        else:
-            cur.append(w)
-    if cur:
-        out.append(" ".join(cur))
-    return out
+    """Backward-compat — dùng smart_split_text (v327-style)."""
+    return smart_split_text(text, max_chars)
+
+
+class VoiceFetchWorker(QThread):
+    """Fetch voice meta off UI thread."""
+
+    done = Signal(object)  # dict info
+    failed = Signal(str)
+
+    def __init__(self, voice_id: str):
+        super().__init__()
+        self.voice_id = voice_id
+
+    def run(self):
+        try:
+            self.done.emit(fetch_voice_info(self.voice_id))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class LoadFilesWorker(QThread):
+    """Read files + split chunks off UI thread (layout v327-style)."""
+
+    progress = Signal(str)
+    done = Signal(object, object)  # sources, chunks
+    failed = Signal(str)
+
+    def __init__(self, paths: List[str], max_chars: int, output_dir: str = ""):
+        super().__init__()
+        self.paths = paths
+        self.max_chars = max_chars
+        self.output_dir = output_dir or ""
+
+    def run(self):
+        try:
+            sources: List[dict] = []
+            for i, p in enumerate(self.paths):
+                self.progress.emit(
+                    f"Đang đọc tệp {i+1}/{len(self.paths)}: {os.path.basename(p)}"
+                )
+                try:
+                    if p.lower().endswith(".srt"):
+                        text = self._srt_to_text(p)
+                    else:
+                        text = Path(p).read_text(encoding="utf-8", errors="ignore")
+                    sources.append(
+                        {"file": os.path.basename(p), "path": p, "text": text}
+                    )
+                except Exception as e:
+                    self.progress.emit(f"Lỗi đọc tệp {os.path.basename(p)}: {e}")
+            self.progress.emit(
+                f"Đang chia đoạn (smart split ≤{self.max_chars} ký tự)…"
+            )
+            out_root = self.output_dir or os.path.join(
+                os.path.dirname(__file__), "..", "output"
+            )
+            os.makedirs(out_root, exist_ok=True)
+            chunks = build_chunks_from_sources(
+                sources, int(self.max_chars or 300), out_root
+            )
+            # map existing mp3 → path for UI
+            for ch in chunks:
+                op = ch.get("out_path") or ""
+                if op and os.path.isfile(op) and os.path.getsize(op) > 500:
+                    ch["path"] = op
+            self.done.emit(sources, chunks)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+    @staticmethod
+    def _srt_to_text(path: str) -> str:
+        raw = Path(path).read_text(encoding="utf-8", errors="ignore")
+        lines = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.isdigit() or "-->" in line:
+                continue
+            lines.append(line)
+        return " ".join(lines)
 
 
 class BatchWorker(QThread):
     log = Signal(str)
-    row_started = Signal(int)
+    row_status = Signal(int, str)  # absolute row, status label
     row_done = Signal(int, bool, str, str)
     file_progress = Signal(int, int, int)
     finished = Signal(int, int)
@@ -56,8 +133,13 @@ class BatchWorker(QThread):
         voice: str,
         lang: str,
         model: str,
-        workers: int = 2,
-        hsw_workers: int = 2,
+        workers: int = 5,
+        hsw_workers: int = 5,
+        speed: float = 1.0,
+        stability: float = 0.5,
+        similarity_boost: float = 0.75,
+        proxy_api_key: str = "",
+        proxy_lines: Optional[List[dict]] = None,
     ):
         super().__init__()
         self.chunks = chunks
@@ -66,60 +148,179 @@ class BatchWorker(QThread):
         self.voice = voice
         self.lang = lang
         self.model = model
-        self.workers = max(1, min(5, int(workers or 1)))
-        self.hsw_workers = max(1, min(4, int(hsw_workers or 2)))
+        # N proxy → N TTS lanes (cap 5); pool = 3N tokens
+        self.workers = max(1, min(5, int(workers or 5)))
+        self.hsw_workers = max(1, min(8, int(hsw_workers or 5)))
+        self.speed = float(speed or 1.0)
+        self.stability = float(stability if stability is not None else 0.5)
+        self.similarity_boost = float(
+            similarity_boost if similarity_boost is not None else 0.75
+        )
+        self.proxy_api_key = proxy_api_key or ""
+        self.proxy_lines = list(proxy_lines or [])
         self._stop = False
 
     def stop(self):
         self._stop = True
 
     def run(self):
-        ok = fail = 0
-        os.makedirs(self.output_dir, exist_ok=True)
+        """Pipeline: multi-lane TTS + output layout v327 (doan_N + merge)."""
+        import asyncio
 
-        def one(row: int, ch: dict):
-            if self._stop:
-                return row, False, "", "stopped"
-            self.row_started.emit(row)
+        os.makedirs(self.output_dir, exist_ok=True)
+        total = len(self.chunks)
+        done_n = 0
+        done_lock = threading.Lock()
+
+        # per-file: track remaining chunks → merge when 0
+        file_pending: dict[str, int] = {}
+        file_meta: dict[str, dict] = {}
+        for ch in self.chunks:
+            fn = ch.get("file") or "doan.txt"
+            file_pending[fn] = file_pending.get(fn, 0) + 1
+            if fn not in file_meta:
+                file_meta[fn] = {
+                    "file_dir": ch.get("file_dir")
+                    or os.path.dirname(ch.get("out_path") or self.output_dir),
+                    "merged_path": ch.get("merged_path")
+                    or os.path.join(
+                        self.output_dir,
+                        Path(fn).stem,
+                        f"{Path(fn).stem}.mp3",
+                    ),
+                    "total_parts": int(ch.get("total_parts") or 0),
+                }
+
+        jobs = []
+        for i, ch in enumerate(self.chunks):
             text = ch.get("text") or ""
-            src = Path(ch.get("file") or "chunk").stem
-            out = os.path.join(
-                self.output_dir, f"{row+1:04d}_{src}_{len(text)}c.mp3"
+            fname = ch.get("file") or "doan.txt"
+            part = int(ch.get("part") or (i + 1))
+            out = ch.get("out_path") or doan_path(self.output_dir, fname, part)
+            # ensure parent dir
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            ch["out_path"] = out
+            jobs.append(
+                {
+                    "row": i,
+                    "text": text,
+                    "out_path": out,
+                    "file": fname,
+                    "part": part,
+                }
             )
-            try:
-                synthesize_one_sync(
-                    text=text,
-                    out_path=out,
-                    proxy=self.proxy,
+
+        def on_start(row: int):
+            if self._stop:
+                return
+            ch = self.chunks[row] if 0 <= row < len(self.chunks) else {}
+            self.log.emit(
+                f"▶ {ch.get('file')} · doan_{ch.get('part') or row+1}/"
+                f"{ch.get('total_parts') or '?'} · "
+                f"{len(ch.get('text') or '')} ký tự"
+            )
+
+        def on_status(row: int, status: str):
+            self.row_status.emit(row, status)
+
+        def try_merge_file(fname: str):
+            meta = file_meta.get(fname) or {}
+            fdir = meta.get("file_dir") or ""
+            mout = meta.get("merged_path") or ""
+            total_p = int(meta.get("total_parts") or 0)
+            if not fdir or not mout:
+                return
+            ok_m, msg = merge_doan_mp3s(
+                fdir, mout, expected_parts=total_p,
+                silent_between=SILENT_1S_PATH,
+            )
+            if ok_m:
+                self.log.emit(f"📦 {fname}: {msg}")
+            else:
+                self.log.emit(f"⚠ Merge {fname}: {msg}")
+
+        def on_done(row: int, success: bool, path: str, err: str):
+            nonlocal done_n
+            with done_lock:
+                done_n += 1
+                cur = done_n
+            ch = self.chunks[row] if 0 <= row < len(self.chunks) else {}
+            fname = ch.get("file") or ""
+            if success:
+                # Append 0.5s silence for each comma/period in chunk text
+                if path and os.path.isfile(path):
+                    text = ch.get("text") or ""
+                    punct_count = text.count(",") + text.count(".")
+                    for _ in range(punct_count):
+                        append_silence_to_mp3(path, SILENT_05S_PATH)
+                
+                if path:
+                    ch["path"] = path
+                self.row_status.emit(row, "Xong")
+                self.row_done.emit(row, True, path, "")
+                rel = path
+                try:
+                    rel = os.path.relpath(path, self.output_dir) if path else ""
+                except Exception:
+                    rel = os.path.basename(path) if path else ""
+                self.log.emit(
+                    f"✅ {fname} doan_{ch.get('part') or row+1} → {rel}"
+                )
+                # merge when last chunk of this file finishes
+                if fname in file_pending:
+                    file_pending[fname] = max(0, file_pending[fname] - 1)
+                    if file_pending[fname] == 0:
+                        try_merge_file(fname)
+            else:
+                self.row_status.emit(row, "Lỗi")
+                self.row_done.emit(row, False, "", err)
+                self.log.emit(
+                    f"❌ {fname} doan_{ch.get('part') or row+1}: {err}"
+                )
+                if fname in file_pending:
+                    file_pending[fname] = max(0, file_pending[fname] - 1)
+            self.file_progress.emit(0, cur, total)
+
+        try:
+            # Multi-lane: N proxy → N TTS song song · pool 3N · mint∥TTS
+            n_lines = max(1, len(self.proxy_lines) or (1 if self.proxy else 1))
+            ok, fail = asyncio.run(
+                run_jobs(
+                    jobs,
+                    proxy_url=self.proxy or "",
+                    proxy_api_key=self.proxy_api_key,
+                    proxy_lines=self.proxy_lines or None,
                     voice=self.voice,
                     model=self.model,
                     lang=self.lang,
+                    speed=self.speed,
+                    stability=self.stability,
+                    similarity_boost=self.similarity_boost,
                     hsw_workers=self.hsw_workers,
+                    workers=max(1, min(self.workers, n_lines)),
+                    tokens_per_lane=3,
+                    max_attempts=40,
+                    should_stop=lambda: self._stop,
+                    on_start=on_start,
+                    on_status=on_status,
+                    on_done=on_done,
                 )
-                return row, True, out, ""
-            except Exception as e:
-                return row, False, "", str(e)[:240]
+            )
+            # safety: merge any file that still has all doan_* on disk
+            for fn, left in list(file_pending.items()):
+                if left == 0:
+                    continue
+                meta = file_meta.get(fn) or {}
+                fdir = meta.get("file_dir") or ""
+                total_p = int(meta.get("total_parts") or 0)
+                if fdir and total_p > 0:
+                    from output_layout import list_doan_files
 
-        # Serial-ish: each synthesize uses shared farm; multi workers still ok with farm lock
-        with ThreadPoolExecutor(max_workers=self.workers) as ex:
-            futs = {
-                ex.submit(one, i, self.chunks[i]): i for i in range(len(self.chunks))
-            }
-            done_n = 0
-            for fut in as_completed(futs):
-                if self._stop:
-                    break
-                row, success, path, err = fut.result()
-                done_n += 1
-                if success:
-                    ok += 1
-                    self.row_done.emit(row, True, path, "")
-                    self.log.emit(f"✅ #{row+1} → {os.path.basename(path)}")
-                else:
-                    fail += 1
-                    self.row_done.emit(row, False, "", err)
-                    self.log.emit(f"❌ #{row+1} {err}")
-                self.file_progress.emit(0, done_n, len(self.chunks))
+                    if len(list_doan_files(fdir)) >= total_p:
+                        try_merge_file(fn)
+        except Exception as e:
+            self.log.emit(f"❌ Lỗi hệ thống: {e}")
+            ok, fail = 0, total
         self.finished.emit(ok, fail)
 
 
@@ -139,7 +340,11 @@ class PreviewTab(QtWidgets.QWidget):
         self._cfg = load_config()
         self._sources: List[dict] = []
         self._chunks: List[dict] = []
+        self._chunk_status: dict[int, str] = {}  # absolute index → status
+        self._chunk_page = 0
         self._batch: Optional[BatchWorker] = None
+        self._load_worker: Optional[LoadFilesWorker] = None
+        self._voice_worker: Optional[VoiceFetchWorker] = None
         self._setup_ui()
         self._load_cfg()
         self._refresh_account_badge()
@@ -225,16 +430,16 @@ class PreviewTab(QtWidgets.QWidget):
             layout.addWidget(label)
             return frame, layout
 
-        # Settings dialog — account + proxyxoay (local)
+        # Settings dialog — quản lý giọng đọc + account info (proxy do admin web)
         self.settings_dialog = QtWidgets.QDialog(self)
-        self.settings_dialog.setWindowTitle("Cài đặt · Account + Proxyxoay")
+        self.settings_dialog.setWindowTitle("Cài đặt · Giọng đọc")
         self.settings_dialog.setModal(False)
-        self.settings_dialog.resize(480, 480)
+        self.settings_dialog.resize(520, 560)
         sl = QtWidgets.QVBoxLayout(self.settings_dialog)
         sl.setContentsMargins(16, 14, 16, 14)
         sl.setSpacing(8)
 
-        t1 = QtWidgets.QLabel("Account local")
+        t1 = QtWidgets.QLabel("Tài khoản đang dùng")
         t1.setObjectName("cardTitle")
         sl.addWidget(t1)
         self.lbl_login_status = QtWidgets.QLabel("—")
@@ -242,50 +447,78 @@ class PreviewTab(QtWidgets.QWidget):
         sl.addWidget(self.lbl_login_status)
 
         tip = QtWidgets.QLabel(
-            "Tool local generate TTS (fast_tts).\n"
-            "Admin account / gói ký tự / proxy pool → web:\n"
-            "https://tts-origin.liveyt.pro/admin/"
+            "Proxy, gói ký tự và số luồng do admin cấp trên web.\n"
+            "Tool chỉ chọn giọng đọc và cài đặt tạo audio (tự lưu).\n"
+            "Trang quản trị: https://tts-origin.liveyt.pro/admin/"
         )
         tip.setObjectName("muted")
         tip.setWordWrap(True)
         sl.addWidget(tip)
 
-        t2 = QtWidgets.QLabel("Proxyxoay gắn account này")
+        t2 = QtWidgets.QLabel("Quản lý giọng đọc")
         t2.setObjectName("cardTitle")
         sl.addWidget(t2)
-        self.ed_px_key = QtWidgets.QLineEdit()
-        self.ed_px_key.setPlaceholderText("Proxyxoay API key (để change-ip, tuỳ chọn)")
-        sl.addWidget(self.ed_px_key)
-        row_u = QtWidgets.QHBoxLayout()
-        self.ed_px_user = QtWidgets.QLineEdit()
-        self.ed_px_user.setPlaceholderText("username")
-        self.ed_px_pass = QtWidgets.QLineEdit()
-        self.ed_px_pass.setPlaceholderText("password")
-        self.ed_px_pass.setEchoMode(QtWidgets.QLineEdit.Password)
-        row_u.addWidget(self.ed_px_user)
-        row_u.addWidget(self.ed_px_pass)
-        sl.addLayout(row_u)
-        row_h = QtWidgets.QHBoxLayout()
-        self.ed_px_host = QtWidgets.QLineEdit()
-        self.ed_px_host.setPlaceholderText("host e.g. vipvn7.proxyxoay.net")
-        self.ed_px_port = QtWidgets.QSpinBox()
-        self.ed_px_port.setRange(1, 65535)
-        self.ed_px_port.setValue(8978)
-        row_h.addWidget(self.ed_px_host, 2)
-        row_h.addWidget(self.ed_px_port, 1)
-        sl.addLayout(row_h)
-        self.ed_px_label = QtWidgets.QLineEdit()
-        self.ed_px_label.setPlaceholderText("Nhãn (tuỳ chọn)")
-        sl.addWidget(self.ed_px_label)
 
-        self.bt_save_proxy = QtWidgets.QPushButton("Lưu proxy cho account")
-        self.bt_save_proxy.setObjectName("primaryButton")
-        sl.addWidget(self.bt_save_proxy)
+        self.tbl_voices = QtWidgets.QTableWidget(0, 3)
+        self.tbl_voices.setHorizontalHeaderLabels(["Tên giọng", "Mã giọng (ID)", "Ngôn ngữ"])
+        self.tbl_voices.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_voices.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.tbl_voices.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tbl_voices.verticalHeader().setVisible(False)
+        self.tbl_voices.setAlternatingRowColors(True)
+        vh = self.tbl_voices.horizontalHeader()
+        vh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        vh.setSectionResizeMode(1, QHeaderView.Stretch)
+        vh.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.tbl_voices.setColumnWidth(2, 72)
+        self.tbl_voices.setMinimumHeight(160)
+        sl.addWidget(self.tbl_voices, 1)
+
+        vf = QtWidgets.QGridLayout()
+        self.ed_v_name = QtWidgets.QLineEdit()
+        self.ed_v_name.setPlaceholderText("Tên hiển thị (tự điền sau khi lấy thông tin)")
+        self.ed_v_id = QtWidgets.QLineEdit()
+        self.ed_v_id.setPlaceholderText("Dán mã giọng (vd: NOpBlnGInO9m6vDvFkFC)")
+        self.ed_v_lang = QtWidgets.QLineEdit()
+        self.ed_v_lang.setPlaceholderText("ngôn ngữ")
+        self.ed_v_lang.setText("en")
+        self.ed_v_lang.setMaximumWidth(72)
+        self.bt_voice_fetch = QtWidgets.QPushButton("Lấy thông tin")
+        self.bt_voice_fetch.setToolTip(
+            "Lấy tên, ngôn ngữ, mô tả giọng từ thư viện ElevenLabs (public API)"
+        )
+        vf.addWidget(QtWidgets.QLabel("Mã giọng"), 0, 0)
+        vf.addWidget(self.ed_v_id, 0, 1, 1, 2)
+        vf.addWidget(self.bt_voice_fetch, 0, 3)
+        vf.addWidget(QtWidgets.QLabel("Tên"), 1, 0)
+        vf.addWidget(self.ed_v_name, 1, 1, 1, 2)
+        vf.addWidget(self.ed_v_lang, 1, 3)
+        sl.addLayout(vf)
+
+        self.lbl_voice_info = QtWidgets.QLabel(
+            "Nhập mã giọng → bấm «Lấy thông tin» để điền tên / ngôn ngữ / mô tả"
+        )
+        self.lbl_voice_info.setObjectName("muted")
+        self.lbl_voice_info.setWordWrap(True)
+        self.lbl_voice_info.setMinimumHeight(48)
+        sl.addWidget(self.lbl_voice_info)
+
+        vbtn = QtWidgets.QHBoxLayout()
+        self.bt_voice_add = QtWidgets.QPushButton("Thêm giọng")
+        self.bt_voice_add.setObjectName("primaryButton")
+        self.bt_voice_upd = QtWidgets.QPushButton("Cập nhật dòng chọn")
+        self.bt_voice_del = QtWidgets.QPushButton("Xóa dòng chọn")
+        self.bt_voice_use = QtWidgets.QPushButton("Dùng giọng này")
+        vbtn.addWidget(self.bt_voice_add)
+        vbtn.addWidget(self.bt_voice_upd)
+        vbtn.addWidget(self.bt_voice_del)
+        vbtn.addWidget(self.bt_voice_use)
+        sl.addLayout(vbtn)
+
         self.lbl_settings_msg = QtWidgets.QLabel("")
         self.lbl_settings_msg.setObjectName("muted")
         self.lbl_settings_msg.setWordWrap(True)
         sl.addWidget(self.lbl_settings_msg)
-        sl.addStretch(1)
 
         content = QtWidgets.QHBoxLayout()
         left = QtWidgets.QVBoxLayout()
@@ -293,30 +526,31 @@ class PreviewTab(QtWidgets.QWidget):
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(10)
 
-        voice_card, voice_l = card("Giọng nói · Preview local")
+        voice_card, voice_l = card("Giọng đọc")
         top_bar = QtWidgets.QHBoxLayout()
-        badge = QtWidgets.QLabel("fast_tts · HSW preview")
+        badge = QtWidgets.QLabel("Tạo audio · tuần tự · giữ IP đến 401")
         badge.setObjectName("badge")
         top_bar.addWidget(badge)
         top_bar.addStretch(1)
         self.bt_settings = QtWidgets.QToolButton()
         self.bt_settings.setObjectName("settingsButton")
         self.bt_settings.setText("⚙")
-        self.bt_settings.setToolTip("Proxyxoay / account")
+        self.bt_settings.setToolTip("Cài đặt giọng đọc")
         top_bar.addWidget(self.bt_settings)
         voice_l.addLayout(top_bar)
 
-        self.ed_voice_id = QtWidgets.QLineEdit()
-        self.ed_voice_id.setPlaceholderText("Voice ID")
-        self.ed_voice_id.setText(DEFAULT_VOICE)
+        # Chọn giọng đã lưu (lang ẩn — lấy từ giọng đã lưu)
+        self.cb_voice = QtWidgets.QComboBox()
+        self.cb_voice.setMinimumHeight(30)
+        voice_l.addWidget(self.cb_voice)
         self.ed_lang = QtWidgets.QLineEdit()
-        self.ed_lang.setPlaceholderText("lang")
+        self.ed_lang.setVisible(False)
         self.ed_lang.setText("en")
-        self.ed_lang.setMaximumWidth(80)
-        vr = QtWidgets.QHBoxLayout()
-        vr.addWidget(self.ed_voice_id, 3)
-        vr.addWidget(self.ed_lang, 1)
-        voice_l.addLayout(vr)
+        voice_l.addWidget(self.ed_lang)
+        self.ed_voice_id = QtWidgets.QLineEdit()
+        self.ed_voice_id.setVisible(False)
+        self.ed_voice_id.setText(DEFAULT_VOICE)
+        voice_l.addWidget(self.ed_voice_id)
         self.lbl_account = QtWidgets.QLabel("")
         self.lbl_account.setObjectName("muted")
         voice_l.addWidget(self.lbl_account)
@@ -326,44 +560,67 @@ class PreviewTab(QtWidgets.QWidget):
         src_top = QtWidgets.QHBoxLayout()
         self.ed_input_path = QtWidgets.QLineEdit()
         self.ed_input_path.setReadOnly(True)
-        self.ed_input_path.setPlaceholderText("Chọn TXT / Thư mục / SRT")
-        self.bt_txt = QtWidgets.QPushButton("TXT")
+        self.ed_input_path.setPlaceholderText("Chọn tệp TXT / thư mục / SRT…")
+        self.bt_txt = QtWidgets.QPushButton("Tệp TXT")
         self.bt_folder = QtWidgets.QPushButton("Thư mục")
-        self.bt_srt = QtWidgets.QPushButton("SRT")
+        self.bt_srt = QtWidgets.QPushButton("Tệp SRT")
         src_top.addWidget(self.ed_input_path, 1)
         src_top.addWidget(self.bt_txt)
         src_top.addWidget(self.bt_folder)
         src_top.addWidget(self.bt_srt)
         source_l.addLayout(src_top)
+        # voice_settings (payload TTS) — không show luồng/HSW/max đoạn (admin web + fixed 5)
         opt = QtWidgets.QHBoxLayout()
-        opt.addWidget(QtWidgets.QLabel("Tối đa mỗi đoạn"))
-        self.sb_max_chars = QtWidgets.QSpinBox()
-        self.sb_max_chars.setRange(100, 1000)
-        self.sb_max_chars.setSingleStep(50)
-        self.sb_max_chars.setValue(900)
-        opt.addWidget(self.sb_max_chars)
-        opt.addWidget(QtWidgets.QLabel("ký tự"))
-        opt.addSpacing(8)
-        opt.addWidget(QtWidgets.QLabel("Luồng TTS"))
-        self.sb_workers = QtWidgets.QSpinBox()
-        # hard max 5; account may lower further in _refresh_account_badge
-        self.sb_workers.setRange(1, 5)
-        self.sb_workers.setValue(2)
-        opt.addWidget(self.sb_workers)
-        opt.addWidget(QtWidgets.QLabel("HSW"))
-        self.sb_hsw = QtWidgets.QSpinBox()
-        self.sb_hsw.setRange(1, 4)
-        self.sb_hsw.setValue(2)
-        opt.addWidget(self.sb_hsw)
+        opt.addWidget(QtWidgets.QLabel("Tốc độ đọc"))
+        self.sb_speed = QtWidgets.QDoubleSpinBox()
+        self.sb_speed.setRange(0.70, 1.20)
+        self.sb_speed.setSingleStep(0.05)
+        self.sb_speed.setDecimals(2)
+        self.sb_speed.setValue(1.00)
+        self.sb_speed.setToolTip("Tốc độ giọng nói (0.70 chậm – 1.20 nhanh)")
+        opt.addWidget(self.sb_speed)
+        opt.addSpacing(10)
+        opt.addWidget(QtWidgets.QLabel("Ổn định"))
+        self.sb_stability = QtWidgets.QDoubleSpinBox()
+        self.sb_stability.setRange(0.0, 1.0)
+        self.sb_stability.setSingleStep(0.05)
+        self.sb_stability.setDecimals(2)
+        self.sb_stability.setValue(0.50)
+        self.sb_stability.setToolTip(
+            "Độ ổn định giọng (thấp = linh hoạt hơn, cao = đều hơn)"
+        )
+        opt.addWidget(self.sb_stability)
+        opt.addSpacing(10)
+        opt.addWidget(QtWidgets.QLabel("Giống giọng gốc"))
+        self.sb_similarity = QtWidgets.QDoubleSpinBox()
+        self.sb_similarity.setRange(0.0, 1.0)
+        self.sb_similarity.setSingleStep(0.05)
+        self.sb_similarity.setDecimals(2)
+        self.sb_similarity.setValue(0.75)
+        self.sb_similarity.setToolTip(
+            "Mức bám sát giọng gốc (cao = giống mẫu hơn)"
+        )
+        opt.addWidget(self.sb_similarity)
         opt.addStretch(1)
-        self.lbl_chunk_summary = QtWidgets.QLabel("0 đoạn / 0 chunk")
+        self.lbl_chunk_summary = QtWidgets.QLabel("0 tệp / 0 đoạn")
         self.lbl_chunk_summary.setObjectName("badge")
         opt.addWidget(self.lbl_chunk_summary)
         source_l.addLayout(opt)
+        # Hidden runtime knobs (not shown — admin / fixed)
+        self._max_chars = 300
+        self._workers = 5
+        self._hsw_workers = 5
         self.ed_text = QtWidgets.QPlainTextEdit()
         self.ed_text.setReadOnly(True)
-        self.ed_text.setPlaceholderText("Nội dung file sẽ hiển thị tại đây...")
-        self.ed_text.setMinimumHeight(110)
+        self.ed_text.setPlaceholderText("Nội dung file sẽ hiển thị tại đây…")
+        self.ed_text.setMinimumHeight(140)
+        self.ed_text.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
+        self.ed_text.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
+        self.ed_text.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.ed_text.setStyleSheet(
+            "QPlainTextEdit { background: #fafafa; border: 1px solid #c9c9c9; "
+            "border-radius: 6px; padding: 6px; }"
+        )
         source_l.addWidget(self.ed_text, 1)
         left.addWidget(source_card, 1)
 
@@ -378,6 +635,16 @@ class PreviewTab(QtWidgets.QWidget):
         self.bt_start = QtWidgets.QPushButton("Bắt đầu")
         self.bt_stop = QtWidgets.QPushButton("Dừng")
         self.bt_output = QtWidgets.QPushButton("Mở thư mục")
+        self.bt_edit_mp3 = QtWidgets.QPushButton("Edit MP3")
+        self.bt_edit_mp3.setToolTip(
+            "Mở tab Edit MP3 — cắt / ghép / nối (ffmpeg copy mode)"
+        )
+        self.bt_edit_mp3.setCursor(QtCore.Qt.PointingHandCursor)
+        self.bt_edit_mp3.setStyleSheet(
+            "QPushButton { background: #ffffff; color: #171717; border: 1px solid #d4d4d4; "
+            "border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 600; }"
+            "QPushButton:hover { background: #f5f5f5; }"
+        )
         self.bt_start.setObjectName("primaryButton")
         self.bt_stop.setObjectName("dangerButton")
         self.lbl_result = QtWidgets.QLabel("Kết quả: 0/0")
@@ -385,6 +652,7 @@ class PreviewTab(QtWidgets.QWidget):
         run.addWidget(self.bt_start)
         run.addWidget(self.bt_stop)
         run.addWidget(self.bt_output)
+        run.addWidget(self.bt_edit_mp3)
         run.addStretch(1)
         run.addWidget(self.lbl_result)
         out_l.addLayout(run)
@@ -393,9 +661,9 @@ class PreviewTab(QtWidgets.QWidget):
         out_l.addWidget(self.progress)
         left.addWidget(out_card)
 
-        queue_card, queue_l = card("File đang chờ")
+        queue_card, queue_l = card("Hàng đợi tệp")
         self.tbl_queue = QtWidgets.QTableWidget(0, 4)
-        self.tbl_queue.setHorizontalHeaderLabels(["STT", "Tệp", "Trạng thái", "Tiến độ"])
+        self.tbl_queue.setHorizontalHeaderLabels(["STT", "Tên tệp", "Trạng thái", "Tiến độ"])
         self.tbl_queue.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_queue.verticalHeader().setVisible(False)
         qh = self.tbl_queue.horizontalHeader()
@@ -411,10 +679,10 @@ class PreviewTab(QtWidgets.QWidget):
         queue_l.addWidget(self.tbl_queue)
         right.addWidget(queue_card)
 
-        chunks_card, chunks_l = card("Danh sách đoạn")
+        chunks_card, chunks_l = card("Danh sách đoạn cần tạo")
         self.tbl_sub = QtWidgets.QTableWidget(0, 6)
         self.tbl_sub.setHorizontalHeaderLabels(
-            ["STT", "Tệp", "Size", "Ký tự", "Nội dung", "Trạng thái"]
+            ["Đoạn", "Tệp", "Dung lượng", "Ký tự", "Nội dung", "Trạng thái"]
         )
         self.tbl_sub.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.tbl_sub.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -423,13 +691,26 @@ class PreviewTab(QtWidgets.QWidget):
         for c in (0, 1, 2, 3, 5):
             h.setSectionResizeMode(c, QHeaderView.Fixed)
         h.setSectionResizeMode(4, QHeaderView.Stretch)
-        self.tbl_sub.setColumnWidth(0, 44)
-        self.tbl_sub.setColumnWidth(1, 100)
+        self.tbl_sub.setColumnWidth(0, 88)
+        self.tbl_sub.setColumnWidth(1, 110)
         self.tbl_sub.setColumnWidth(2, 78)
         self.tbl_sub.setColumnWidth(3, 50)
-        self.tbl_sub.setColumnWidth(5, 82)
+        self.tbl_sub.setColumnWidth(5, 100)
         self.tbl_sub.setAlternatingRowColors(True)
-        chunks_l.addWidget(self.tbl_sub)
+        self.tbl_sub.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        chunks_l.addWidget(self.tbl_sub, 1)
+        # Pagination — không render cả nghìn dòng cùng lúc
+        page_row = QtWidgets.QHBoxLayout()
+        self.bt_page_prev = QtWidgets.QPushButton("◀")
+        self.bt_page_next = QtWidgets.QPushButton("▶")
+        self.bt_page_prev.setFixedWidth(36)
+        self.bt_page_next.setFixedWidth(36)
+        self.lbl_page = QtWidgets.QLabel("Trang 0/0")
+        self.lbl_page.setObjectName("muted")
+        page_row.addWidget(self.bt_page_prev)
+        page_row.addWidget(self.bt_page_next)
+        page_row.addWidget(self.lbl_page, 1)
+        chunks_l.addLayout(page_row)
         right.addWidget(chunks_card, 1)
 
         content.addLayout(left, 38)
@@ -441,46 +722,133 @@ class PreviewTab(QtWidgets.QWidget):
 
         self.bt_stop.setEnabled(False)
         self.bt_settings.clicked.connect(self._open_settings)
-        self.bt_save_proxy.clicked.connect(self._save_proxy)
+        self.bt_voice_fetch.clicked.connect(self._voice_fetch_info)
+        self.bt_voice_add.clicked.connect(self._voice_add)
+        self.bt_voice_upd.clicked.connect(self._voice_update)
+        self.bt_voice_del.clicked.connect(self._voice_delete)
+        self.bt_voice_use.clicked.connect(self._voice_use_selected)
+        self.tbl_voices.itemSelectionChanged.connect(self._voice_row_selected)
+        self.ed_v_id.returnPressed.connect(self._voice_fetch_info)
+        self.cb_voice.currentIndexChanged.connect(self._on_voice_combo)
         self.bt_txt.clicked.connect(self._pick_txt)
         self.bt_folder.clicked.connect(self._pick_folder)
         self.bt_srt.clicked.connect(self._pick_srt)
-        self.sb_max_chars.valueChanged.connect(self._rebuild_chunks)
+        self.sb_speed.valueChanged.connect(self._on_setting_changed)
+        self.sb_stability.valueChanged.connect(self._on_setting_changed)
+        self.sb_similarity.valueChanged.connect(self._on_setting_changed)
+        self.ed_output_dir.editingFinished.connect(self._persist_cfg)
         self.bt_browse_out.clicked.connect(self._browse_out)
         self.bt_start.clicked.connect(self._start)
         self.bt_stop.clicked.connect(self._stop)
         self.bt_output.clicked.connect(self._open_out)
+        self.bt_edit_mp3.clicked.connect(self._open_edit_mp3)
         self.tbl_sub.cellDoubleClicked.connect(self._open_chunk)
+        self.bt_page_prev.clicked.connect(self._page_prev)
+        self.bt_page_next.clicked.connect(self._page_next)
+
+    def _voices_list(self) -> list:
+        voices = list(self._cfg.get("voices") or [])
+        if not voices:
+            voices = [
+                {
+                    "name": "Giọng mặc định",
+                    "voice_id": self._cfg.get("voice_id") or DEFAULT_VOICE,
+                    "lang": self._cfg.get("lang") or "en",
+                }
+            ]
+            self._cfg["voices"] = voices
+        return voices
+
+    def _reload_voice_combo(self, select_id: Optional[str] = None):
+        voices = self._voices_list()
+        want = select_id or self.ed_voice_id.text().strip() or DEFAULT_VOICE
+        self.cb_voice.blockSignals(True)
+        self.cb_voice.clear()
+        sel = 0
+        for i, v in enumerate(voices):
+            vid = (v.get("voice_id") or "").strip()
+            name = (v.get("name") or vid or f"Giọng {i+1}").strip()
+            lang = (v.get("lang") or "en").strip()
+            self.cb_voice.addItem(f"{name} · ngôn ngữ {lang}", v)
+            if vid == want:
+                sel = i
+        self.cb_voice.setCurrentIndex(sel)
+        self.cb_voice.blockSignals(False)
+        self._apply_combo_voice()
+
+    def _reload_voice_table(self):
+        voices = self._voices_list()
+        self.tbl_voices.setRowCount(0)
+        for v in voices:
+            r = self.tbl_voices.rowCount()
+            self.tbl_voices.insertRow(r)
+            self.tbl_voices.setItem(r, 0, QtWidgets.QTableWidgetItem(v.get("name") or ""))
+            self.tbl_voices.setItem(
+                r, 1, QtWidgets.QTableWidgetItem(v.get("voice_id") or "")
+            )
+            self.tbl_voices.setItem(r, 2, QtWidgets.QTableWidgetItem(v.get("lang") or "en"))
+
+    def _apply_combo_voice(self):
+        data = self.cb_voice.currentData()
+        if isinstance(data, dict):
+            self.ed_voice_id.setText((data.get("voice_id") or DEFAULT_VOICE).strip())
+            self.ed_lang.setText((data.get("lang") or "en").strip())
+        elif self.cb_voice.count() == 0:
+            self.ed_voice_id.setText(DEFAULT_VOICE)
+
+    def _on_voice_combo(self, _idx: int = 0):
+        self._apply_combo_voice()
+        self._persist_cfg()
+
+    def _on_setting_changed(self, *_args):
+        self._persist_cfg()
 
     def _load_cfg(self):
         c = self._cfg
         self.ed_output_dir.setText(
             c.get("output_dir") or os.path.join(os.path.dirname(__file__), "..", "output")
         )
-        self.sb_max_chars.setValue(int(c.get("max_chars") or 900))
-        self.sb_workers.setValue(int(c.get("workers") or 2))
-        self.sb_hsw.setValue(int(c.get("hsw_workers") or 2))
+        # fixed runtime (not shown)
+        self._max_chars = int(c.get("max_chars") or 300)
+        self._workers = 5
+        self._hsw_workers = 5
+        self.sb_speed.blockSignals(True)
+        self.sb_stability.blockSignals(True)
+        self.sb_similarity.blockSignals(True)
+        self.sb_speed.setValue(float(c.get("speed") if c.get("speed") is not None else 1.0))
+        self.sb_stability.setValue(
+            float(c.get("stability") if c.get("stability") is not None else 0.5)
+        )
+        self.sb_similarity.setValue(
+            float(
+                c.get("similarity_boost")
+                if c.get("similarity_boost") is not None
+                else 0.75
+            )
+        )
+        self.sb_speed.blockSignals(False)
+        self.sb_stability.blockSignals(False)
+        self.sb_similarity.blockSignals(False)
         self.ed_voice_id.setText(c.get("voice_id") or DEFAULT_VOICE)
         self.ed_lang.setText(c.get("lang") or "en")
-        # proxy from account
-        self.ed_px_key.setText(self.user.get("proxy_api_key") or "")
-        self.ed_px_user.setText(self.user.get("proxy_username") or "")
-        self.ed_px_pass.setText(self.user.get("proxy_password") or "")
-        self.ed_px_host.setText(self.user.get("proxy_host") or "")
-        if self.user.get("proxy_port"):
-            self.ed_px_port.setValue(int(self.user["proxy_port"]))
-        self.ed_px_label.setText(self.user.get("proxy_label") or "")
+        self._reload_voice_combo(c.get("voice_id"))
+        self._reload_voice_table()
 
     def _persist_cfg(self):
         c = self.load_config()
+        voices = self._voices_list()
         c.update(
             {
                 "output_dir": self.ed_output_dir.text().strip(),
-                "max_chars": self.sb_max_chars.value(),
-                "workers": self.sb_workers.value(),
-                "hsw_workers": self.sb_hsw.value(),
-                "voice_id": self.ed_voice_id.text().strip(),
+                "max_chars": int(self._max_chars or 300),
+                "workers": 5,
+                "hsw_workers": 5,
+                "voice_id": self.ed_voice_id.text().strip() or DEFAULT_VOICE,
                 "lang": self.ed_lang.text().strip() or "en",
+                "speed": float(self.sb_speed.value()),
+                "stability": float(self.sb_stability.value()),
+                "similarity_boost": float(self.sb_similarity.value()),
+                "voices": voices,
             }
         )
         self.save_config(c)
@@ -489,147 +857,520 @@ class PreviewTab(QtWidgets.QWidget):
     def _refresh_account_badge(self):
         pub = accounts.public_account(self.user)
         u = pub.get("username") or "?"
-        px = "có proxy" if accounts.build_proxy_url(self.user) else "CHƯA gắn proxy"
         left = int(pub.get("chars_left") or 0)
         quota = int(pub.get("char_quota") or 0)
         used = int(pub.get("chars_used") or 0)
-        mw = min(5, max(1, int(pub.get("max_workers") or 2)))
-        self.sb_workers.setMaximum(mw)
-        if self.sb_workers.value() > mw:
-            self.sb_workers.setValue(mw)
-        host = self.user.get("proxy_host") or pub.get("proxy_host") or "—"
-        if self.user.get("proxy_id"):
-            p = accounts.get_proxy(self.user["proxy_id"])
-            if p:
-                host = p.get("host") or host
-        self.lbl_login_status.setText(
-            f"{u} · {px} · {used:,}/{quota:,} ký tự · max {mw} luồng"
-        )
-        self.lbl_account.setText(
-            f"{u} · gói còn {left:,} ký tự · max luồng {mw} · proxy={host}"
-        )
+        unlimited = bool(pub.get("unlimited")) or accounts.is_unlimited_quota(quota)
+        # account max_workers from admin (≤5); runtime workers = min(5, mw)
+        mw = min(5, max(1, int(pub.get("max_workers") or 5)))
+        self._workers = mw
+        self._hsw_workers = 5
+        if unlimited:
+            self.lbl_login_status.setText(
+                f"{u} · Unlimited · đã gen {used:,} ký tự · tối đa {mw} luồng"
+            )
+            self.lbl_account.setText(
+                f"{u} · gói Unlimited · tối đa {mw} luồng"
+            )
+        else:
+            self.lbl_login_status.setText(
+                f"{u} · đã dùng {used:,}/{quota:,} ký tự · tối đa {mw} luồng"
+            )
+            self.lbl_account.setText(
+                f"{u} · còn {left:,} ký tự trong gói · tối đa {mw} luồng"
+            )
 
     def _open_settings(self):
+        self._reload_voice_table()
+        self.lbl_settings_msg.setText("")
         self.settings_dialog.show()
         self.settings_dialog.raise_()
 
-    def _save_proxy(self):
-        """Save inline proxy on this account (or admin: use Quản trị tab for pool)."""
-        try:
-            accounts.update_account(
-                self.user["id"],
-                proxy_provider="proxyxoay_net",
-                proxy_api_key=self.ed_px_key.text().strip(),
-                proxy_username=self.ed_px_user.text().strip(),
-                proxy_password=self.ed_px_pass.text(),
-                proxy_host=self.ed_px_host.text().strip(),
-                proxy_port=self.ed_px_port.value(),
-                proxy_label=self.ed_px_label.text().strip(),
+    def _voice_row_selected(self):
+        rows = self.tbl_voices.selectionModel().selectedRows()
+        if not rows:
+            return
+        r = rows[0].row()
+        voices = self._voices_list()
+        if r < 0 or r >= len(voices):
+            return
+        v = voices[r]
+        self.ed_v_name.setText(v.get("name") or "")
+        self.ed_v_id.setText(v.get("voice_id") or "")
+        self.ed_v_lang.setText(v.get("lang") or "en")
+        desc = (v.get("description") or "").strip()
+        if desc:
+            self.lbl_voice_info.setText(desc[:280] + ("…" if len(desc) > 280 else ""))
+
+    def _voice_fetch_info(self):
+        """Nhập voice_id → fetch off UI thread (shared-voices API)."""
+        vid = self.ed_v_id.text().strip()
+        if not vid:
+            self.lbl_settings_msg.setText("Hãy nhập mã giọng trước")
+            return
+        if self._voice_worker and self._voice_worker.isRunning():
+            self.lbl_settings_msg.setText("Đang lấy thông tin… vui lòng chờ")
+            return
+        self.bt_voice_fetch.setEnabled(False)
+        self.bt_voice_fetch.setText("Đang lấy…")
+        self.lbl_settings_msg.setText("Đang tải thông tin giọng (chạy nền)…")
+        w = VoiceFetchWorker(vid)
+        self._voice_worker = w
+        w.done.connect(self._on_voice_fetched)
+        w.failed.connect(self._on_voice_fetch_failed)
+        w.finished.connect(lambda: self.bt_voice_fetch.setEnabled(True))
+        w.finished.connect(lambda: self.bt_voice_fetch.setText("Lấy thông tin"))
+        w.start()
+
+    def _on_voice_fetched(self, info: object):
+        if not isinstance(info, dict):
+            return
+        self.ed_v_id.setText(info.get("voice_id") or "")
+        self.ed_v_name.setText(info.get("name") or "")
+        self.ed_v_lang.setText(info.get("language") or "en")
+        _vn_gender = {
+            "male": "nam",
+            "female": "nữ",
+            "neutral": "trung tính",
+        }
+        _vn_age = {
+            "young": "trẻ",
+            "middle_aged": "trung niên",
+            "old": "già",
+        }
+        bits = [
+            info.get("name") or "",
+            f"mã={info.get('voice_id')}",
+            f"ngôn ngữ={info.get('language') or '?'}",
+        ]
+        if info.get("gender"):
+            bits.append(
+                f"giới tính={_vn_gender.get(str(info['gender']).lower(), info['gender'])}"
             )
-            full = accounts.get_account(self.user["id"])
-            if full:
-                self.user = full
-            self._refresh_account_badge()
-            self.lbl_settings_msg.setText(
-                f"✅ Đã lưu proxy account '{self.user.get('username')}' "
-                f"→ {self.user.get('proxy_host')}:{self.user.get('proxy_port')}"
+        if info.get("age"):
+            bits.append(f"độ tuổi={_vn_age.get(str(info['age']).lower(), info['age'])}")
+        if info.get("accent"):
+            bits.append(f"giọng vùng={info['accent']}")
+        if info.get("category"):
+            bits.append(f"loại={info['category']}")
+        if info.get("use_case"):
+            bits.append(f"dùng cho={info['use_case']}")
+        if info.get("verified_languages"):
+            bits.append(
+                "hỗ trợ: " + ", ".join(info["verified_languages"][:8])
             )
-        except Exception as e:
-            self.lbl_settings_msg.setText(f"Lỗi: {e}")
+        desc = (info.get("description") or "").strip()
+        text = " · ".join(b for b in bits if b)
+        if desc:
+            text += "\n" + desc[:320] + ("…" if len(desc) > 320 else "")
+        self.lbl_voice_info.setText(text)
+        self._last_voice_meta = info
+        self.lbl_settings_msg.setText(
+            f"✅ Đã lấy «{info.get('name')}» — bấm «Thêm giọng» hoặc «Dùng giọng này»"
+        )
+
+    def _on_voice_fetch_failed(self, err: str):
+        self._last_voice_meta = None
+        self.lbl_voice_info.setText("")
+        self.lbl_settings_msg.setText(f"❌ {err}")
+
+    def _voice_add(self):
+        name = self.ed_v_name.text().strip()
+        vid = self.ed_v_id.text().strip()
+        lang = (self.ed_v_lang.text().strip() or "en")
+        if not vid:
+            self.lbl_settings_msg.setText("Hãy nhập mã giọng")
+            return
+        if not name:
+            # Prefer last fetched meta (async); never block UI with network here
+            meta0 = getattr(self, "_last_voice_meta", None) or {}
+            if meta0.get("voice_id") == vid or not meta0.get("voice_id"):
+                name = (meta0.get("name") or "").strip() or (vid[:12] + "…")
+                if meta0.get("language"):
+                    lang = meta0.get("language") or lang
+            else:
+                name = vid[:12] + "…"
+            self.ed_v_name.setText(name)
+        voices = self._voices_list()
+        for v in voices:
+            if v.get("voice_id") == vid:
+                self.lbl_settings_msg.setText("Mã giọng này đã có trong danh sách")
+                return
+        meta = getattr(self, "_last_voice_meta", None) or {}
+        if meta.get("voice_id") != vid:
+            meta = {}
+        voices.append(
+            {
+                "name": name,
+                "voice_id": vid,
+                "lang": lang,
+                "description": (meta.get("description") or "")[:400],
+                "gender": meta.get("gender") or "",
+                "accent": meta.get("accent") or "",
+            }
+        )
+        self._cfg["voices"] = voices
+        self._persist_cfg()
+        self._reload_voice_table()
+        self._reload_voice_combo(vid)
+        self.lbl_settings_msg.setText(f"✅ Đã thêm giọng «{name}»")
+
+    def _voice_update(self):
+        rows = self.tbl_voices.selectionModel().selectedRows()
+        if not rows:
+            self.lbl_settings_msg.setText("Hãy chọn một giọng trong bảng")
+            return
+        r = rows[0].row()
+        voices = self._voices_list()
+        if r < 0 or r >= len(voices):
+            return
+        name = self.ed_v_name.text().strip()
+        vid = self.ed_v_id.text().strip()
+        lang = self.ed_v_lang.text().strip() or "en"
+        if not vid:
+            self.lbl_settings_msg.setText("Mã giọng đang trống")
+            return
+        if not name:
+            name = vid[:12] + "…"
+        voices[r] = {"name": name, "voice_id": vid, "lang": lang}
+        self._cfg["voices"] = voices
+        self._persist_cfg()
+        self._reload_voice_table()
+        self._reload_voice_combo(vid)
+        self.lbl_settings_msg.setText(f"✅ Đã cập nhật «{name}»")
+
+    def _voice_delete(self):
+        rows = self.tbl_voices.selectionModel().selectedRows()
+        if not rows:
+            self.lbl_settings_msg.setText("Hãy chọn một giọng trong bảng để xóa")
+            return
+        r = rows[0].row()
+        voices = self._voices_list()
+        if len(voices) <= 1:
+            self.lbl_settings_msg.setText("Cần giữ lại ít nhất 1 giọng")
+            return
+        if r < 0 or r >= len(voices):
+            return
+        removed = voices.pop(r)
+        self._cfg["voices"] = voices
+        self._persist_cfg()
+        self._reload_voice_table()
+        self._reload_voice_combo(voices[0].get("voice_id"))
+        self.lbl_settings_msg.setText(
+            f"Đã xóa «{removed.get('name') or removed.get('voice_id')}»"
+        )
+
+    def _voice_use_selected(self):
+        rows = self.tbl_voices.selectionModel().selectedRows()
+        if not rows:
+            # use form fields
+            vid = self.ed_v_id.text().strip()
+            if not vid:
+                self.lbl_settings_msg.setText(
+                    "Hãy chọn giọng trong bảng hoặc nhập mã giọng"
+                )
+                return
+            lang = self.ed_v_lang.text().strip() or "en"
+            self.ed_voice_id.setText(vid)
+            self.ed_lang.setText(lang)
+            self._reload_voice_combo(vid)
+            self._persist_cfg()
+            self.lbl_settings_msg.setText("✅ Đã chọn giọng từ ô nhập")
+            return
+        r = rows[0].row()
+        voices = self._voices_list()
+        if r < 0 or r >= len(voices):
+            return
+        v = voices[r]
+        self.ed_voice_id.setText(v.get("voice_id") or DEFAULT_VOICE)
+        self.ed_lang.setText(v.get("lang") or "en")
+        self._reload_voice_combo(v.get("voice_id"))
+        self._persist_cfg()
+        self.lbl_settings_msg.setText(
+            f"✅ Đang dùng «{v.get('name') or v.get('voice_id')}»"
+        )
 
     def _set_status(self, text: str):
         self._status.setText(text)
 
     def _pick_txt(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Chọn TXT", "", "Text (*.txt);;All (*.*)"
+            self,
+            "Chọn tệp văn bản TXT",
+            "",
+            "Tệp văn bản (*.txt);;Tất cả tệp (*.*)",
         )
         if path:
             self._load_paths([path], "txt")
 
     def _pick_folder(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Chọn thư mục TXT")
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Chọn thư mục chứa tệp TXT"
+        )
         if d:
             paths = sorted(str(p) for p in Path(d).rglob("*.txt") if p.is_file())
-            self._load_paths(paths, "folder")
+            self._load_paths(paths, "thư mục")
 
     def _pick_srt(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Chọn SRT", "", "SRT (*.srt);;All (*.*)"
+            self,
+            "Chọn tệp phụ đề SRT",
+            "",
+            "Phụ đề SRT (*.srt);;Tất cả tệp (*.*)",
         )
         if path:
             self._load_paths([path], "srt")
 
     def _load_paths(self, paths: List[str], source_type: str):
-        self._sources = []
-        for p in paths:
-            try:
-                if p.lower().endswith(".srt"):
-                    text = self._srt_to_text(p)
-                else:
-                    text = Path(p).read_text(encoding="utf-8", errors="ignore")
-                self._sources.append(
-                    {"file": os.path.basename(p), "path": p, "text": text}
-                )
-            except Exception as e:
-                self._set_status(f"Lỗi đọc {p}: {e}")
+        if not paths:
+            return
+        if self._load_worker and self._load_worker.isRunning():
+            self._set_status("Đang đọc tệp khác — vui lòng chờ xong…")
+            return
+        if self._batch and self._batch.isRunning():
+            self._set_status(
+                "Đang tạo audio — hãy bấm Dừng trước khi mở tệp mới"
+            )
+            return
         self.ed_input_path.setText(
-            paths[0] if len(paths) == 1 else f"{len(paths)} files ({source_type})"
+            paths[0]
+            if len(paths) == 1
+            else f"{len(paths)} tệp ({source_type})"
         )
-        preview = "\n\n".join(
-            f"--- {s['file']} ---\n{s['text'][:800]}" for s in self._sources[:3]
+        self.ed_text.setPlainText("Đang đọc tệp và chia đoạn…")
+        self.bt_start.setEnabled(False)
+        self._set_status(f"Đang tải {len(paths)} tệp (chạy nền)…")
+        out_dir = self.ed_output_dir.text().strip() or os.path.join(
+            os.path.dirname(__file__), "..", "output"
         )
-        self.ed_text.setPlainText(preview)
-        self._rebuild_chunks()
-        self._rebuild_queue_table()
+        w = LoadFilesWorker(
+            paths, int(self._max_chars or 300), output_dir=out_dir
+        )
+        self._load_worker = w
+        w.progress.connect(self._set_status)
+        w.done.connect(self._on_files_loaded)
+        w.failed.connect(self._on_files_load_failed)
+        w.start()
 
-    def _srt_to_text(self, path: str) -> str:
-        raw = Path(path).read_text(encoding="utf-8", errors="ignore")
-        lines = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.isdigit() or "-->" in line:
-                continue
-            lines.append(line)
-        return " ".join(lines)
-
-    def _rebuild_chunks(self):
-        max_c = self.sb_max_chars.value()
-        self._chunks = []
+    def _on_files_loaded(self, sources: object, chunks: object):
+        self._sources = list(sources or [])
+        self._chunks = list(chunks or [])
+        self._chunk_status = {i: "Chờ" for i in range(len(self._chunks))}
+        self._chunk_page = 0
+        # preview text with scroll (cap size)
+        parts = []
+        used = 0
         for s in self._sources:
-            for i, t in enumerate(split_chunks(s["text"], max_c)):
-                self._chunks.append({"file": s["file"], "part": i + 1, "text": t, "path": None})
+            block = f"--- {s['file']} ---\n{s.get('text') or ''}\n\n"
+            if used + len(block) > PREVIEW_TEXT_MAX:
+                remain = PREVIEW_TEXT_MAX - used
+                if remain > 80:
+                    parts.append(
+                        block[:remain] + "\n… (đã cắt phần xem trước — tệp còn dài hơn)"
+                    )
+                break
+            parts.append(block)
+            used += len(block)
+        self.ed_text.setPlainText("".join(parts) or "(trống)")
+        self.ed_text.verticalScrollBar().setValue(0)
         self.lbl_chunk_summary.setText(
-            f"{len(self._sources)} đoạn / {len(self._chunks)} chunk"
+            f"{len(self._sources)} tệp / {len(self._chunks)} đoạn"
         )
-        self.tbl_sub.setRowCount(len(self._chunks))
-        for i, ch in enumerate(self._chunks):
-            self.tbl_sub.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
-            self.tbl_sub.setItem(i, 1, QtWidgets.QTableWidgetItem(ch["file"][:40]))
-            self.tbl_sub.setItem(i, 2, QtWidgets.QTableWidgetItem("-"))
-            self.tbl_sub.setItem(i, 3, QtWidgets.QTableWidgetItem(str(len(ch["text"]))))
-            prev = ch["text"][:80] + ("…" if len(ch["text"]) > 80 else "")
-            self.tbl_sub.setItem(i, 4, QtWidgets.QTableWidgetItem(prev))
-            self.tbl_sub.setItem(i, 5, QtWidgets.QTableWidgetItem("chờ"))
+        self._rebuild_queue_table()
+        self._render_chunk_page()
+        self.bt_start.setEnabled(True)
+        out_root = self.ed_output_dir.text().strip() or "output"
+        self._set_status(
+            f"Sẵn sàng · {len(self._sources)} tệp · {len(self._chunks)} đoạn "
+            f"· layout {{output}}/{{stem}}/doan_N.mp3 · {out_root}"
+        )
         self._persist_cfg()
 
+    def _on_files_load_failed(self, err: str):
+        self.bt_start.setEnabled(True)
+        self.ed_text.setPlainText("")
+        self._set_status(f"Lỗi khi tải tệp: {err}")
+
+    def _total_chunk_pages(self) -> int:
+        n = len(self._chunks)
+        if n <= 0:
+            return 0
+        return (n + CHUNK_PAGE_SIZE - 1) // CHUNK_PAGE_SIZE
+
+    def _page_prev(self):
+        if self._chunk_page > 0:
+            self._chunk_page -= 1
+            self._render_chunk_page()
+
+    def _page_next(self):
+        if self._chunk_page + 1 < self._total_chunk_pages():
+            self._chunk_page += 1
+            self._render_chunk_page()
+
+    def _render_chunk_page(self):
+        """Chỉ vẽ 1 trang chunk — tránh lag main thread."""
+        total = len(self._chunks)
+        pages = self._total_chunk_pages()
+        if pages == 0:
+            self.tbl_sub.setRowCount(0)
+            self.lbl_page.setText("Trang 0/0")
+            self.bt_page_prev.setEnabled(False)
+            self.bt_page_next.setEnabled(False)
+            return
+        if self._chunk_page >= pages:
+            self._chunk_page = pages - 1
+        start = self._chunk_page * CHUNK_PAGE_SIZE
+        end = min(start + CHUNK_PAGE_SIZE, total)
+        self.tbl_sub.setUpdatesEnabled(False)
+        self.tbl_sub.setRowCount(end - start)
+        for local, abs_i in enumerate(range(start, end)):
+            ch = self._chunks[abs_i]
+            st = self._chunk_status.get(abs_i, "Chờ")
+            part = ch.get("part") or (abs_i + 1)
+            total_p = ch.get("total_parts") or "?"
+            self.tbl_sub.setItem(
+                local,
+                0,
+                QtWidgets.QTableWidgetItem(f"doan_{part}/{total_p}"),
+            )
+            self.tbl_sub.setItem(
+                local, 1, QtWidgets.QTableWidgetItem((ch.get("file") or "")[:40])
+            )
+            size = "—"
+            p = ch.get("path") or ch.get("out_path")
+            if p and os.path.exists(p) and os.path.getsize(p) > 500:
+                try:
+                    size = f"{os.path.getsize(p) // 1024} KB"
+                except Exception:
+                    size = "đã có"
+            self.tbl_sub.setItem(local, 2, QtWidgets.QTableWidgetItem(size))
+            self.tbl_sub.setItem(
+                local, 3, QtWidgets.QTableWidgetItem(str(len(ch.get("text") or "")))
+            )
+            prev = (ch.get("text") or "")[:80]
+            if len(ch.get("text") or "") > 80:
+                prev += "…"
+            self.tbl_sub.setItem(local, 4, QtWidgets.QTableWidgetItem(prev))
+            item = QtWidgets.QTableWidgetItem(st)
+            st_l = st.lower()
+            if st == "Xong" or st_l == "xong":
+                item.setForeground(QtGui.QColor("#166534"))
+            elif "lỗi" in st_l:
+                item.setForeground(QtGui.QColor("#991b1b"))
+            elif "đang" in st_l or "chạy" in st_l:
+                item.setForeground(QtGui.QColor("#b45309"))
+            self.tbl_sub.setItem(local, 5, item)
+        self.tbl_sub.setUpdatesEnabled(True)
+        self.lbl_page.setText(
+            f"Trang {self._chunk_page + 1}/{pages} · đoạn {start + 1}–{end}/{total}"
+        )
+        self.bt_page_prev.setEnabled(self._chunk_page > 0)
+        self.bt_page_next.setEnabled(self._chunk_page + 1 < pages)
+
+    def _set_chunk_status(self, abs_row: int, status: str):
+        self._chunk_status[abs_row] = status
+        start = self._chunk_page * CHUNK_PAGE_SIZE
+        end = start + CHUNK_PAGE_SIZE
+        if start <= abs_row < end:
+            local = abs_row - start
+            if 0 <= local < self.tbl_sub.rowCount():
+                item = QtWidgets.QTableWidgetItem(status)
+                st_l = status.lower()
+                if status == "Xong" or st_l == "xong":
+                    item.setForeground(QtGui.QColor("#166534"))
+                elif "lỗi" in st_l:
+                    item.setForeground(QtGui.QColor("#991b1b"))
+                elif "đang" in st_l or "chạy" in st_l:
+                    item.setForeground(QtGui.QColor("#b45309"))
+                self.tbl_sub.setItem(local, 5, item)
+
     def _rebuild_queue_table(self):
-        self.tbl_queue.setRowCount(len(self._sources))
-        for i, s in enumerate(self._sources):
+        # queue files: cap display to 200 rows to avoid lag
+        show = self._sources[:200]
+        # totals per file for % progress
+        self._file_total: dict[str, int] = {}
+        self._file_done: dict[str, int] = {}
+        self._file_row: dict[str, int] = {}
+        for ch in self._chunks:
+            fn = ch.get("file") or ""
+            if not fn:
+                continue
+            self._file_total[fn] = self._file_total.get(fn, 0) + 1
+            # already-have on disk count as done for display
+            p = ch.get("path") or ch.get("out_path") or ""
+            if p and os.path.isfile(p) and os.path.getsize(p) > 500:
+                self._file_done[fn] = self._file_done.get(fn, 0) + 1
+        self.tbl_queue.setUpdatesEnabled(False)
+        self.tbl_queue.setRowCount(len(show))
+        for i, s in enumerate(show):
+            fn = s.get("file") or ""
+            self._file_row[fn] = i
+            total = max(1, self._file_total.get(fn, 1))
+            done = min(total, self._file_done.get(fn, 0))
+            pct = int(100 * done / total)
+            if done >= total:
+                st, st_color = "Xong", "#166534"
+            elif done > 0:
+                st, st_color = "Đang chạy", "#b45309"
+            else:
+                st, st_color = "Chờ", None
             self.tbl_queue.setItem(i, 0, QtWidgets.QTableWidgetItem(str(i + 1)))
-            self.tbl_queue.setItem(i, 1, QtWidgets.QTableWidgetItem(s["file"]))
-            self.tbl_queue.setItem(i, 2, QtWidgets.QTableWidgetItem("chờ"))
-            self.tbl_queue.setItem(i, 3, QtWidgets.QTableWidgetItem("0%"))
+            self.tbl_queue.setItem(i, 1, QtWidgets.QTableWidgetItem(fn))
+            it_st = QtWidgets.QTableWidgetItem(st)
+            if st_color:
+                it_st.setForeground(QtGui.QColor(st_color))
+            self.tbl_queue.setItem(i, 2, it_st)
+            self.tbl_queue.setItem(i, 3, QtWidgets.QTableWidgetItem(f"{pct}%"))
+        self.tbl_queue.setUpdatesEnabled(True)
+        if len(self._sources) > 200:
+            self._set_status(
+                f"Hàng đợi chỉ hiện 200/{len(self._sources)} tệp "
+                f"(vẫn tạo audio đủ tất cả đoạn)"
+            )
+
+    def _bump_queue_file(self, fname: str, ok: bool = True):
+        """Cập nhật % + trạng thái 1 dòng hàng đợi tệp."""
+        if not fname:
+            return
+        if not hasattr(self, "_file_total"):
+            return
+        total = max(1, int(self._file_total.get(fname) or 1))
+        done = min(total, int(self._file_done.get(fname) or 0) + (1 if ok else 0))
+        if ok:
+            self._file_done[fname] = done
+        pct = int(100 * done / total)
+        row = self._file_row.get(fname)
+        if row is None or row >= self.tbl_queue.rowCount():
+            return
+        if done >= total:
+            st, color = "Xong", "#166534"
+            # show merge file if present
+            merged = ""
+            for ch in self._chunks:
+                if ch.get("file") == fname and ch.get("merged_path"):
+                    merged = ch.get("merged_path") or ""
+                    break
+            if merged and os.path.isfile(merged) and os.path.getsize(merged) > 500:
+                st = "Xong · đã merge"
+        elif done > 0:
+            st, color = "Đang chạy", "#b45309"
+        else:
+            st, color = "Chờ", None
+        it_st = QtWidgets.QTableWidgetItem(st)
+        if color:
+            it_st.setForeground(QtGui.QColor(color))
+        self.tbl_queue.setItem(row, 2, it_st)
+        self.tbl_queue.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{pct}%"))
 
     def _browse_out(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Thư mục xuất")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Chọn thư mục xuất audio")
         if d:
             self.ed_output_dir.setText(d)
             self._persist_cfg()
 
     def _start(self):
         if not self._chunks:
-            self._set_status("Chưa có chunk — chọn file trước.")
+            self._set_status("Chưa có đoạn nào — hãy chọn tệp TXT/SRT trước.")
             return
         # refresh account from disk
         full = accounts.get_account(self.user.get("id") or "")
@@ -640,9 +1381,9 @@ class PreviewTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Thiếu proxy",
-                "Account chưa gắn proxyxoay.\n"
-                "Admin: tab Quản trị → Proxy + gán cho Account.\n"
-                "Hoặc ⚙ → điền proxy inline → Lưu.",
+                "Tài khoản chưa được admin gắn proxy.\n"
+                "Liên hệ admin cấp proxy tại:\n"
+                "https://tts-origin.liveyt.pro/admin/",
             )
             return
         total_chars = sum(len(c.get("text") or "") for c in self._chunks)
@@ -650,19 +1391,48 @@ class PreviewTab(QtWidgets.QWidget):
         if not ok_q:
             QtWidgets.QMessageBox.warning(self, "Hết gói ký tự", msg_q)
             return
-        mw = min(5, max(1, int(self.user.get("max_workers") or 2)))
-        workers = min(self.sb_workers.value(), mw)
+        # Scale: N proxy key → N TTS lanes · pool 3N token (cap max_workers)
+        mw = min(5, max(1, int(self.user.get("max_workers") or 5)))
+        proxy_lines = accounts.list_proxy_lines_for_gen(self.user, max_lanes=mw)
+        if not proxy_lines:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Thiếu proxy",
+                "Không có proxy enabled trong pool.\n"
+                "Admin thêm proxy (proxyxoay.net hoặc proxyxoay.shop) tại:\n"
+                "https://tts-origin.liveyt.pro/admin/",
+            )
+            return
+        n_lanes = len(proxy_lines)
+        workers = n_lanes
+        hsw = min(8, max(3, n_lanes * 3))  # farm ≈ token pool size
+        self._workers = workers
+        self._hsw_workers = hsw
         self._persist_cfg()
         out = self.ed_output_dir.text().strip()
         if not out:
-            self._set_status("Chọn thư mục xuất.")
+            self._set_status("Hãy chọn thư mục xuất audio.")
             return
         self.bt_start.setEnabled(False)
         self.bt_stop.setEnabled(True)
         self.progress.setValue(0)
         self.lbl_result.setText(f"Kết quả: 0/{len(self._chunks)}")
-        for i in range(self.tbl_sub.rowCount()):
-            self.tbl_sub.setItem(i, 5, QtWidgets.QTableWidgetItem("chờ"))
+        self._chunk_status = {i: "Chờ" for i in range(len(self._chunks))}
+        self._chunk_page = 0
+        # reset queue % (chỉ đếm lại từ 0 khi gen mới; skip-on-disk vẫn cập nhật sau)
+        self._file_done = {fn: 0 for fn in (getattr(self, "_file_total", {}) or {})}
+        self._rebuild_queue_table()
+        # zero done for fresh run display (rebuild counted existing files)
+        for fn in list(self._file_done.keys()):
+            # keep pre-existing as progress so skip looks correct
+            pass
+        self._render_chunk_page()
+        px_key = self.user.get("proxy_api_key") or ""
+        if not px_key and proxy_lines:
+            px_key = proxy_lines[0].get("api_key") or ""
+        labels = ", ".join(
+            (p.get("label") or p.get("id") or "?") for p in proxy_lines
+        )
         self._batch = BatchWorker(
             chunks=self._chunks,
             output_dir=out,
@@ -671,16 +1441,22 @@ class PreviewTab(QtWidgets.QWidget):
             lang=self.ed_lang.text().strip() or "en",
             model=DEFAULT_MODEL,
             workers=workers,
-            hsw_workers=self.sb_hsw.value(),
+            hsw_workers=hsw,
+            speed=float(self.sb_speed.value()),
+            stability=float(self.sb_stability.value()),
+            similarity_boost=float(self.sb_similarity.value()),
+            proxy_api_key=str(px_key or ""),
+            proxy_lines=proxy_lines,
         )
         self._batch.log.connect(self._set_status)
-        self._batch.row_started.connect(self._on_row_started)
+        self._batch.row_status.connect(self._on_row_status)
         self._batch.row_done.connect(self._on_row_done)
         self._batch.file_progress.connect(self._on_progress)
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
         self._set_status(
-            f"Đang generate {len(self._chunks)} chunk · {workers} luồng · "
+            f"Đang tạo {len(self._chunks)} đoạn · {n_lanes} lane TTS · "
+            f"pool {n_lanes * 3} token · proxy: {labels} · "
             f"~{total_chars:,} ký tự…"
         )
 
@@ -689,58 +1465,193 @@ class PreviewTab(QtWidgets.QWidget):
             self._batch.stop()
             self._set_status("Đang dừng…")
 
-    def _on_row_started(self, row: int):
-        self.tbl_sub.setItem(row, 5, QtWidgets.QTableWidgetItem("chạy"))
+    def _on_row_status(self, row: int, status: str):
+        self._set_chunk_status(row, status)
+        # jump view to active row page (optional, gentle)
+        page = row // CHUNK_PAGE_SIZE
+        st_l = (status or "").lower()
+        if page != self._chunk_page and "đang" in st_l:
+            # only auto-follow first few running to avoid thrashing
+            if (
+                sum(1 for s in self._chunk_status.values() if "đang" in str(s).lower())
+                <= 2
+            ):
+                self._chunk_page = page
+                self._render_chunk_page()
 
     def _on_row_done(self, row: int, ok: bool, path: str, err: str):
-        if ok:
-            self._chunks[row]["path"] = path
-            # trừ gói ký tự
-            n = len(self._chunks[row].get("text") or "")
-            accounts.consume_chars(self.user.get("id") or "", n)
-            full = accounts.get_account(self.user.get("id") or "")
-            if full:
-                self.user = full
-                self._refresh_account_badge()
-            item = QtWidgets.QTableWidgetItem("xong")
-            item.setForeground(QtGui.QColor("#166534"))
-            self.tbl_sub.setItem(row, 5, item)
-            if path and os.path.exists(path):
+        if 0 <= row < len(self._chunks):
+            fname = self._chunks[row].get("file") or ""
+            if ok:
+                self._chunks[row]["path"] = path
+                n = len(self._chunks[row].get("text") or "")
                 try:
-                    self.tbl_sub.setItem(
-                        row, 2, QtWidgets.QTableWidgetItem(f"{os.path.getsize(path)//1024}KB")
-                    )
+                    accounts.consume_chars(self.user.get("id") or "", n)
+                    full = accounts.get_account(self.user.get("id") or "")
+                    if full:
+                        self.user = full
+                        self._refresh_account_badge()
                 except Exception:
                     pass
-        else:
-            item = QtWidgets.QTableWidgetItem("lỗi")
-            item.setForeground(QtGui.QColor("#991b1b"))
-            item.setToolTip(err)
-            self.tbl_sub.setItem(row, 5, item)
+                self._set_chunk_status(row, "Xong")
+                self._bump_queue_file(fname, ok=True)
+                # refresh size cell if visible
+                start = self._chunk_page * CHUNK_PAGE_SIZE
+                if start <= row < start + CHUNK_PAGE_SIZE:
+                    local = row - start
+                    if path and os.path.exists(path) and local < self.tbl_sub.rowCount():
+                        try:
+                            self.tbl_sub.setItem(
+                                local,
+                                2,
+                                QtWidgets.QTableWidgetItem(
+                                    f"{os.path.getsize(path) // 1024} KB"
+                                ),
+                            )
+                        except Exception:
+                            pass
+            else:
+                self._set_chunk_status(row, "Lỗi")
+                self._bump_queue_file(fname, ok=False)
+                start = self._chunk_page * CHUNK_PAGE_SIZE
+                if start <= row < start + CHUNK_PAGE_SIZE:
+                    local = row - start
+                    if local < self.tbl_sub.rowCount():
+                        item = self.tbl_sub.item(local, 5)
+                        if item:
+                            item.setToolTip(err or "Lỗi không rõ")
 
     def _on_progress(self, _fi: int, cur: int, total: int):
         self.progress.setValue(int(100 * cur / max(1, total)))
-        self.lbl_result.setText(f"Kết quả: {cur}/{total}")
+        self.lbl_result.setText(f"Tiến độ: {cur}/{total} đoạn")
 
     def _on_finished(self, ok: int, fail: int):
         self.bt_start.setEnabled(True)
         self.bt_stop.setEnabled(False)
-        self.lbl_result.setText(f"Kết quả: {ok} ok / {fail} fail")
-        self._set_status(f"Xong — ok={ok} fail={fail}")
+        self.lbl_result.setText(f"Xong: {ok} thành công / {fail} lỗi")
+        self.progress.setValue(100 if ok > 0 else self.progress.value())
+
+        # refresh queue 100% + merge badge
+        merged_paths: list[str] = []
+        seen_m: set[str] = set()
+        for fn in list(getattr(self, "_file_total", {}) or {}):
+            total = max(1, int(self._file_total.get(fn) or 1))
+            self._file_done[fn] = total
+            row = self._file_row.get(fn)
+            merged = ""
+            for ch in self._chunks:
+                if ch.get("file") == fn:
+                    merged = ch.get("merged_path") or ""
+                    break
+            if merged and os.path.isfile(merged) and os.path.getsize(merged) > 500:
+                if merged not in seen_m:
+                    seen_m.add(merged)
+                    merged_paths.append(merged)
+                st_txt = "Xong · đã merge"
+            else:
+                st_txt = "Xong" if fail == 0 or ok > 0 else "Lỗi"
+            if row is not None and row < self.tbl_queue.rowCount():
+                it = QtWidgets.QTableWidgetItem(st_txt)
+                it.setForeground(
+                    QtGui.QColor("#166534" if "Xong" in st_txt else "#991b1b")
+                )
+                self.tbl_queue.setItem(row, 2, it)
+                self.tbl_queue.setItem(row, 3, QtWidgets.QTableWidgetItem("100%"))
+
+        extra = f" · {len(merged_paths)} file tổng đã merge" if merged_paths else ""
+        status = f"Hoàn tất — thành công {ok}, lỗi {fail}{extra}"
+        self._set_status(status)
+        self._render_chunk_page()
         self._batch = None
+
+        # Popup thông báo gen thành công
+        if ok > 0 and fail == 0:
+            lines = [
+                f"Tạo audio thành công: {ok} đoạn.",
+            ]
+            if merged_paths:
+                lines.append("")
+                lines.append("File tổng (merge):")
+                for mp in merged_paths[:8]:
+                    try:
+                        rel = os.path.relpath(
+                            mp, self.ed_output_dir.text().strip() or mp
+                        )
+                    except Exception:
+                        rel = os.path.basename(mp)
+                    kb = os.path.getsize(mp) // 1024
+                    lines.append(f"  • {rel} ({kb} KB)")
+                if len(merged_paths) > 8:
+                    lines.append(f"  … và {len(merged_paths) - 8} file khác")
+            else:
+                lines.append("(Chưa tạo được file merge — kiểm tra doan_*.mp3)")
+            lines.append("")
+            lines.append(f"Thư mục: {self.ed_output_dir.text().strip()}")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Gen thành công",
+                "\n".join(lines),
+            )
+        elif ok > 0 and fail > 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Gen hoàn tất (có lỗi)",
+                f"Thành công {ok} đoạn, lỗi {fail} đoạn.\n"
+                f"File merge: {len(merged_paths)}.\n"
+                f"Thư mục: {self.ed_output_dir.text().strip()}",
+            )
+        elif fail > 0:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Gen thất bại",
+                f"Không tạo được đoạn nào thành công (lỗi {fail}).",
+            )
 
     def _open_out(self):
         d = self.ed_output_dir.text().strip()
         if d and os.path.isdir(d):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(d))
 
-    def _open_chunk(self, row: int, _col: int):
-        if 0 <= row < len(self._chunks):
-            p = self._chunks[row].get("path")
+    def _open_edit_mp3(self):
+        """Nút nhỏ → tab Edit MP3; nạp file merge/doan nếu có."""
+        paths = []
+        # ưu tiên file merge + doan đã gen
+        for ch in self._chunks:
+            mp = ch.get("merged_path") or ""
+            if mp and os.path.isfile(mp) and mp not in paths:
+                paths.append(mp)
+            op = ch.get("path") or ch.get("out_path") or ""
+            if op and os.path.isfile(op) and op not in paths:
+                paths.append(op)
+        if not paths:
+            d = self.ed_output_dir.text().strip()
+            if d and os.path.isdir(d):
+                paths = sorted(
+                    str(p) for p in Path(d).rglob("*.mp3") if p.is_file()
+                )[:50]
+        if hasattr(self.main_window, "show_edit_mp3_tab"):
+            self.main_window.show_edit_mp3_tab(paths or None)
+        else:
+            self._set_status("Không mở được tab Edit MP3")
+
+    def _open_chunk(self, local_row: int, _col: int):
+        abs_row = self._chunk_page * CHUNK_PAGE_SIZE + local_row
+        if 0 <= abs_row < len(self._chunks):
+            ch = self._chunks[abs_row]
+            p = ch.get("path") or ch.get("out_path")
             if p and os.path.exists(p):
                 QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(p))
+            else:
+                # mở folder file nếu chưa có mp3
+                d = ch.get("file_dir") or ""
+                if d and os.path.isdir(d):
+                    QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(d))
 
     def cleanup(self):
         if self._batch:
             self._batch.stop()
             self._batch.wait(5000)
+        if self._load_worker and self._load_worker.isRunning():
+            self._load_worker.wait(3000)
+        if self._voice_worker and self._voice_worker.isRunning():
+            self._voice_worker.wait(3000)
