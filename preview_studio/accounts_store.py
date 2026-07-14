@@ -716,7 +716,37 @@ def ensure_default_account() -> None:
 
 
 def resolve_proxy_for_account(account: dict) -> Optional[str]:
-    """Prefer linked proxy_id from pool, else inline fields on account."""
+    """Build proxy URL from account.
+    
+    Priority:
+    1. account["proxies"] list (many-to-many from Cloudflare)
+    2. Legacy fields (proxy_id, proxy_host...)
+    """
+    # 1) NEW: Read from proxies list (many-to-many)
+    proxies_list = account.get("proxies") or []
+    if proxies_list:
+        # Build URL from first enabled proxy
+        for p in proxies_list:
+            if not p.get("enabled", True):
+                continue
+            provider = (p.get("provider") or "").strip()
+            api_key = (p.get("api_key") or "").strip()
+            host = (p.get("host") or "").strip()
+            port = int(p.get("port") or 0)
+            user = (p.get("username") or "").strip()
+            pw = (p.get("password") or "").strip()
+            
+            # For shop provider, return placeholder (will resolve dynamically)
+            if provider == "proxyxoay_shop" and api_key:
+                return f"shop://{api_key}"
+            
+            # For net/static provider, build URL
+            if host and port:
+                if user and pw:
+                    return f"http://{user}:{pw}@{host}:{port}"
+                return f"http://{host}:{port}"
+    
+    # 2) LEGACY: Read from proxy_id link
     pid = (account.get("proxy_id") or "").strip()
     if pid:
         p = get_proxy(pid)
@@ -729,6 +759,8 @@ def resolve_proxy_for_account(account: dict) -> Optional[str]:
                 if user and pw:
                     return f"http://{user}:{pw}@{host}:{port}"
                 return f"http://{host}:{port}"
+    
+    # 3) LEGACY: Read from inline fields
     host = (account.get("proxy_host") or "").strip()
     port = int(account.get("proxy_port") or 0)
     user = (account.get("proxy_username") or "").strip()
