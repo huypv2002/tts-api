@@ -2,8 +2,15 @@
  * Cloudflare Worker + D1 — Web Admin API
  * Local tool (preview_studio) does NOT use this.
  *
+ * Public (custom domain):
+ *   https://tts-origin.liveyt.pro/admin/
+ *   https://tts-origin.liveyt.pro/admin/api/*
+ *
+ * Also works on workers.dev root:
+ *   /  and  /api/*
+ *
  * Routes:
- *   POST /api/login
+ *   POST /api/login  (or /admin/api/login)
  *   POST /api/logout
  *   GET  /api/dashboard
  *   CRUD /api/accounts
@@ -34,6 +41,142 @@ async function sha256(text) {
   const data = new TextEncoder().encode(text);
   const buf = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Bytes(bytes) {
+  const buf = await crypto.subtle.digest("SHA-256", bytes);
+  return new Uint8Array(buf);
+}
+
+/** Default seal key — set env PROXY_SEAL_KEY in production */
+function sealKeyFromEnv(env) {
+  return String(env.PROXY_SEAL_KEY || env.API_SECRET || "huytts2026").trim();
+}
+
+function b64encode(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+
+function b64decode(str) {
+  const bin = atob(str);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Keystream XOR + HMAC-SHA256 tag (tool-compatible, no external deps) */
+async function sealJson(obj, passphrase) {
+  const plain = new TextEncoder().encode(JSON.stringify(obj));
+  const key = await sha256Bytes(new TextEncoder().encode(passphrase));
+  const nonce = crypto.getRandomValues(new Uint8Array(16));
+  const stream = new Uint8Array(plain.length);
+  let offset = 0;
+  let i = 0;
+  while (offset < plain.length) {
+    const ctr = new Uint8Array(4);
+    ctr[0] = (i >>> 24) & 255;
+    ctr[1] = (i >>> 16) & 255;
+    ctr[2] = (i >>> 8) & 255;
+    ctr[3] = i & 255;
+    const block = await sha256Bytes(
+      (() => {
+        const o = new Uint8Array(key.length + nonce.length + 4);
+        o.set(key, 0);
+        o.set(nonce, key.length);
+        o.set(ctr, key.length + nonce.length);
+        return o;
+      })()
+    );
+    const n = Math.min(32, plain.length - offset);
+    stream.set(block.subarray(0, n), offset);
+    offset += n;
+    i += 1;
+  }
+  const ct = new Uint8Array(plain.length);
+  for (let j = 0; j < plain.length; j++) ct[j] = plain[j] ^ stream[j];
+  // HMAC-SHA256(key, nonce||ct) first 16 bytes as tag
+  const macKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const macData = new Uint8Array(nonce.length + ct.length);
+  macData.set(nonce, 0);
+  macData.set(ct, nonce.length);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", macKey, macData));
+  const tag = sig.subarray(0, 16);
+  const out = new Uint8Array(16 + 16 + ct.length);
+  out.set(nonce, 0);
+  out.set(tag, 16);
+  out.set(ct, 32);
+  return b64encode(out);
+}
+
+function parseShopNote(note) {
+  // SHOP|nhamang=random|tinhthanh=0|whitelist=
+  const o = { shop_nhamang: "random", shop_tinhthanh: 0, shop_whitelist: "", shop_method: "GET" };
+  const n = String(note || "");
+  if (!n.startsWith("SHOP|")) return o;
+  n.split("|").slice(1).forEach((part) => {
+    const eq = part.indexOf("=");
+    if (eq < 0) return;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k === "nhamang") o.shop_nhamang = v || "random";
+    if (k === "tinhthanh") o.shop_tinhthanh = v === "" ? 0 : Number(v) || 0;
+    if (k === "whitelist") o.shop_whitelist = v;
+    if (k === "method") o.shop_method = (v || "GET").toUpperCase();
+  });
+  return o;
+}
+
+function buildShopNote(b) {
+  const nh = b.shop_nhamang || b.nhamang || "random";
+  const tt = b.shop_tinhthanh != null ? b.shop_tinhthanh : b.tinhthanh != null ? b.tinhthanh : 0;
+  const wl = b.shop_whitelist || b.whitelist || "";
+  const m = (b.shop_method || b.method || "GET").toUpperCase();
+  return `SHOP|nhamang=${nh}|tinhthanh=${tt}|whitelist=${wl}|method=${m}`;
+}
+
+function hasProxyCreds({ host, username, api_key, provider }) {
+  const p = String(provider || "").toLowerCase();
+  if (p.includes("shop")) return !!String(api_key || "").trim();
+  if (String(api_key || "").trim()) return true;
+  return !!(host && username);
+}
+
+async function buildProxyPayload(row, poolRow) {
+  const provider =
+    (poolRow && poolRow.provider) ||
+    row.proxy_provider ||
+    "proxyxoay_net";
+  const api_key =
+    row.proxy_api_key || (poolRow && poolRow.api_key) || "";
+  const host = row.proxy_host || (poolRow && poolRow.host) || "";
+  const port = Number(row.proxy_port) || (poolRow && Number(poolRow.port)) || 0;
+  const username =
+    row.proxy_username || (poolRow && poolRow.username) || "";
+  const password =
+    row.proxy_password || (poolRow && poolRow.password) || "";
+  const label =
+    row.proxy_label || (poolRow && poolRow.label) || "";
+  const note = (poolRow && poolRow.note) || row.note || "";
+  const shop = parseShopNote(note);
+  return {
+    id: row.proxy_id || (poolRow && poolRow.id) || "",
+    label,
+    provider,
+    api_key,
+    username,
+    password,
+    host,
+    port,
+    ...shop,
+  };
 }
 
 function parseCookies(req) {
@@ -75,9 +218,19 @@ function clearCookie() {
   return `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
+/** Strip /admin and/or /api prefixes → path used by handlers ("/login", "/accounts", …) */
+function apiPathFromUrl(pathname) {
+  let p = pathname || "/";
+  if (p.startsWith("/admin/api")) p = p.slice("/admin/api".length) || "/";
+  else if (p === "/admin/api") p = "/";
+  else if (p.startsWith("/api")) p = p.slice("/api".length) || "/";
+  if (!p.startsWith("/")) p = "/" + p;
+  return p;
+}
+
 async function handleApi(req, env) {
   const url = new URL(req.url);
-  const path = url.pathname.replace(/^\/api/, "") || "/";
+  const path = apiPathFromUrl(url.pathname);
   const method = req.method.toUpperCase();
 
   // ── login (no auth) ──
@@ -110,6 +263,97 @@ async function handleApi(req, env) {
     return json({ ok: true }, 200, { "Set-Cookie": clearCookie() });
   }
 
+  // ── User login for Preview Studio tool (not admin password) ──
+  // POST { username, password } → account profile for local tool
+  if (
+    (path === "/user/login" || path === "/auth/login") &&
+    method === "POST"
+  ) {
+    const body = await req.json().catch(() => ({}));
+    const username = String(body.username || "").trim();
+    const password = String(body.password || "").trim();
+    if (!username || !password) return err("username/password required", 400);
+
+    const row = await env.DB.prepare(
+      "SELECT * FROM accounts WHERE username = ?"
+    )
+      .bind(username)
+      .first();
+    if (!row) return err("wrong username or password", 401);
+    if (!row.enabled) return err("account disabled", 403);
+
+    const expected = await sha256(`${row.password_salt}:${password}`);
+    if (expected !== row.password_hash) {
+      return err("wrong username or password", 401);
+    }
+
+    // resolve proxy pool slot if proxy_id is set
+    let poolRow = null;
+    if (row.proxy_id) {
+      poolRow = await env.DB.prepare(
+        "SELECT id, label, enabled, host, port, username, password, api_key, provider, note FROM proxies WHERE id = ?"
+      )
+        .bind(row.proxy_id)
+        .first();
+    }
+
+    await env.DB.prepare(
+      "UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?"
+    )
+      .bind(row.id)
+      .run();
+
+    const payload = await buildProxyPayload(row, poolRow);
+    const hasPx = hasProxyCreds(payload);
+    // Encrypt secrets for tool; do not send plain api_key/password over the wire
+    let proxy_sealed = "";
+    if (hasPx) {
+      try {
+        proxy_sealed = await sealJson(payload, sealKeyFromEnv(env));
+      } catch (e) {
+        return err("proxy seal failed: " + String(e.message || e), 500);
+      }
+    }
+
+    return json({
+      ok: true,
+      source: "cloudflare-d1",
+      seal_version: 1,
+      account: {
+        id: row.id,
+        username: row.username,
+        role: row.role || "user",
+        enabled: !!row.enabled,
+        note: row.note || "",
+        package_id: row.package_id || "",
+        package_name: row.package_name || "",
+        char_quota: Number(row.char_quota),
+        chars_used: Number(row.chars_used) || 0,
+        unlimited:
+          Number(row.char_quota) <= 0 || Number(row.char_quota) === -1,
+        chars_left:
+          Number(row.char_quota) <= 0 || Number(row.char_quota) === -1
+            ? -1
+            : Math.max(
+                0,
+                (Number(row.char_quota) || 0) - (Number(row.chars_used) || 0)
+              ),
+        max_workers: Math.min(5, Math.max(1, Number(row.max_workers) || 1)),
+        proxy_id: payload.id || row.proxy_id || "",
+        proxy_provider: payload.provider || "proxyxoay_net",
+        proxy_label: payload.label || "",
+        // non-secret hints only (tool decrypts full creds from proxy_sealed)
+        proxy_host_hint: payload.host || "",
+        proxy_port_hint: payload.port || 0,
+        has_proxy: hasPx,
+        proxy_sealed,
+        // password material so local tool can cache offline login
+        password_salt: row.password_salt,
+        password_hash: row.password_hash,
+      },
+    });
+  }
+
   // all below need admin
   const session = await requireAdmin(env, req);
   if (!session) return err("admin auth required", 401);
@@ -119,16 +363,45 @@ async function handleApi(req, env) {
     const accounts = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM accounts"
     ).first();
+    const proxiesAll = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM proxies"
+    ).first();
     const proxies = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM proxies WHERE enabled = 1"
     ).first();
     const packages = await env.DB.prepare(
       "SELECT id, name, chars FROM packages ORDER BY chars ASC"
     ).all();
+    const pxList = await env.DB.prepare(
+      "SELECT id, label, enabled, host, port, username FROM proxies ORDER BY created_at DESC LIMIT 50"
+    ).all();
+    const accCount = accounts?.c || 0;
+    const pxReady = proxies?.c || 0;
+    const pxTotal = proxiesAll?.c || 0;
+    // Shape compatible with both CF UI and legacy Windows admin JS
+    // (old code did d.usage.jobs_by_status without null-check)
     return json({
-      accounts: accounts?.c || 0,
-      proxies_ready: proxies?.c || 0,
+      accounts: accCount,
+      keys_count: accCount,
+      proxies_ready: pxReady,
       packages: packages.results || [],
+      usage: { jobs_by_status: {}, by_day: [] },
+      proxy: { ready: pxReady, total: pxTotal },
+      settings: {},
+      proxies: (pxList.results || []).map((p) => ({
+        id: p.id,
+        label: p.label || p.id,
+        state: p.enabled ? "ready" : "disabled",
+        exit_ip: null,
+        in_flight: 0,
+        ok_on_ip: 0,
+        total_ok: 0,
+        host: p.host,
+        port: p.port,
+        username: p.username,
+        enabled: !!p.enabled,
+      })),
+      recent_jobs: [],
       note: "Cloudflare D1 admin — independent from local tool & Windows server",
     });
   }
@@ -148,7 +421,15 @@ async function handleApi(req, env) {
        VALUES (?, ?, ?, ?, datetime('now'))
        ON CONFLICT(id) DO UPDATE SET name=excluded.name, chars=excluded.chars, note=excluded.note`
     )
-      .bind(id, b.name || id, Number(b.chars) || 1000000, b.note || "")
+      .bind(
+        id,
+        b.name || id,
+        // -1 = Unlimited; 0 coerced → -1 if flag unlimited
+        b.unlimited || Number(b.chars) === -1 || Number(b.chars) === 0
+          ? -1
+          : Number(b.chars) || 1000000,
+        b.note || (b.unlimited ? "Unlimited" : "")
+      )
       .run();
     return json({ ok: true, id });
   }
@@ -163,29 +444,55 @@ async function handleApi(req, env) {
     const r = await env.DB.prepare(
       "SELECT id, label, enabled, provider, host, port, username, api_key, note, created_at FROM proxies ORDER BY created_at DESC"
     ).all();
-    const rows = (r.results || []).map((p) => ({
-      ...p,
-      password: undefined,
-      has_password: true,
-    }));
+    const rows = (r.results || []).map((p) => {
+      const shop = parseShopNote(p.note);
+      const key = String(p.api_key || "");
+      return {
+        ...p,
+        password: undefined,
+        api_key: key ? key.slice(0, 8) + "…" : "",
+        has_password: true,
+        has_api_key: !!key,
+        provider: p.provider || "proxyxoay_net",
+        ...shop,
+      };
+    });
     return json({ proxies: rows });
   }
   if (path === "/proxies" && method === "POST") {
     const b = await req.json();
     const id = b.id || "px_" + crypto.randomUUID().slice(0, 8);
     const existing = await env.DB.prepare(
-      "SELECT password FROM proxies WHERE id = ?"
+      "SELECT password, api_key, note FROM proxies WHERE id = ?"
     )
       .bind(id)
       .first();
     const password =
       b.password || (existing && existing.password) || "";
+    const provider = b.provider || "proxyxoay_net";
+    const api_key =
+      b.api_key || (existing && existing.api_key) || "";
+    let note = b.note || "";
+    if (String(provider).includes("shop")) {
+      note = buildShopNote(b);
+    } else if (!note && existing && existing.note) {
+      note = existing.note;
+    }
+    const host =
+      provider === "proxyxoay_shop"
+        ? b.host || ""
+        : b.host || "vipvn7.proxyxoay.net";
+    const port =
+      provider === "proxyxoay_shop"
+        ? Number(b.port) || 0
+        : Number(b.port) || 8978;
     await env.DB.prepare(
       `INSERT INTO proxies (id, label, enabled, provider, api_key, username, password, host, port, note, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
        ON CONFLICT(id) DO UPDATE SET
          label=excluded.label, enabled=excluded.enabled, provider=excluded.provider,
-         api_key=excluded.api_key, username=excluded.username,
+         api_key=CASE WHEN excluded.api_key = '' THEN proxies.api_key ELSE excluded.api_key END,
+         username=excluded.username,
          password=CASE WHEN excluded.password = '' THEN proxies.password ELSE excluded.password END,
          host=excluded.host, port=excluded.port, note=excluded.note`
     )
@@ -193,16 +500,16 @@ async function handleApi(req, env) {
         id,
         b.label || id,
         b.enabled === false ? 0 : 1,
-        b.provider || "proxyxoay_net",
-        b.api_key || "",
+        provider,
+        api_key,
         b.username || "",
         password,
-        b.host || "",
-        Number(b.port) || 0,
-        b.note || ""
+        host,
+        port,
+        note
       )
       .run();
-    return json({ ok: true, id });
+    return json({ ok: true, id, provider });
   }
   if (path.startsWith("/proxies/") && method === "DELETE") {
     const id = path.split("/")[2];
@@ -218,13 +525,50 @@ async function handleApi(req, env) {
               proxy_username, proxy_label, api_key_prefix, created_at, last_login_at
        FROM accounts ORDER BY created_at DESC`
     ).all();
-    const rows = (r.results || []).map((a) => ({
-      ...a,
-      chars_left: Math.max(0, (a.char_quota || 0) - (a.chars_used || 0)),
-      has_proxy: !!(a.proxy_host && a.proxy_username) || !!a.proxy_id,
-      max_workers: Math.min(5, Math.max(1, a.max_workers || 1)),
-    }));
-    return json({ accounts: rows });
+    
+    // Lấy danh sách proxies cho từng account
+    const accountsWithProxies = await Promise.all(
+      (r.results || []).map(async (a) => {
+        // Lấy proxies từ bảng account_proxies
+        const proxiesResult = await env.DB.prepare(
+          `SELECT ap.proxy_id, ap.priority, ap.enabled,
+                  p.label, p.provider, p.host, p.port, p.api_key
+           FROM account_proxies ap
+           LEFT JOIN proxies p ON ap.proxy_id = p.id
+           WHERE ap.account_id = ?
+           ORDER BY ap.priority ASC`
+        ).bind(a.id).all();
+        
+        const proxies = (proxiesResult.results || []).map(p => ({
+          proxy_id: p.proxy_id,
+          priority: p.priority,
+          enabled: p.enabled === 1,
+          label: p.label || "",
+          provider: p.provider || "proxyxoay_net",
+          host: p.host || "",
+          port: p.port || 0,
+          api_key_preview: p.api_key ? p.api_key.slice(0, 8) + "..." : ""
+        }));
+        
+        return {
+          ...a,
+          unlimited: Number(a.char_quota) <= 0 || Number(a.char_quota) === -1,
+          chars_left:
+            Number(a.char_quota) <= 0 || Number(a.char_quota) === -1
+              ? -1
+              : Math.max(0, (a.char_quota || 0) - (a.chars_used || 0)),
+          has_proxy: proxies.length > 0 ||
+            !!(a.proxy_host && a.proxy_username) ||
+            !!a.proxy_id ||
+            !!a.proxy_api_key,
+          max_workers: Math.min(5, Math.max(1, a.max_workers || 1)),
+          proxy_provider: a.proxy_provider || "proxyxoay_net",
+          proxies: proxies
+        };
+      })
+    );
+    
+    return json({ accounts: accountsWithProxies });
   }
 
   if (path === "/accounts" && method === "POST") {
@@ -270,6 +614,30 @@ async function handleApi(req, env) {
     api_key_hash = await sha256(api_key);
     api_key_prefix = api_key.slice(0, 12) + "…";
 
+    // Expand proxy pool slot → account fields (net or shop)
+    let proxy_id = b.proxy_id || "";
+    let proxy_provider = b.proxy_provider || "proxyxoay_net";
+    let proxy_api_key = b.proxy_api_key || "";
+    let proxy_username = b.proxy_username || "";
+    let proxy_password = b.proxy_password || "";
+    let proxy_host = b.proxy_host || "";
+    let proxy_port = Number(b.proxy_port) || 0;
+    let proxy_label = b.proxy_label || "";
+    if (proxy_id) {
+      const px = await env.DB.prepare("SELECT * FROM proxies WHERE id = ?")
+        .bind(proxy_id)
+        .first();
+      if (px) {
+        proxy_provider = px.provider || proxy_provider;
+        proxy_api_key = px.api_key || proxy_api_key;
+        proxy_username = px.username || proxy_username;
+        proxy_password = px.password || proxy_password;
+        proxy_host = px.host || proxy_host;
+        proxy_port = Number(px.port) || proxy_port;
+        proxy_label = px.label || proxy_label;
+      }
+    }
+
     await env.DB.prepare(
       `INSERT INTO accounts (
         id, username, password_salt, password_hash, role, enabled, note,
@@ -290,14 +658,14 @@ async function handleApi(req, env) {
         package_name,
         char_quota,
         max_workers,
-        b.proxy_id || "",
-        b.proxy_provider || "proxyxoay_net",
-        b.proxy_api_key || "",
-        b.proxy_username || "",
-        b.proxy_password || "",
-        b.proxy_host || "",
-        Number(b.proxy_port) || 0,
-        b.proxy_label || "",
+        proxy_id,
+        proxy_provider,
+        proxy_api_key,
+        proxy_username,
+        proxy_password,
+        proxy_host,
+        proxy_port,
+        proxy_label,
         api_key_hash,
         api_key_prefix
       )
@@ -311,6 +679,8 @@ async function handleApi(req, env) {
       note: "Save api_key now — not shown again",
       char_quota,
       max_workers,
+      proxy_id,
+      proxy_provider,
     });
   }
 
@@ -351,6 +721,47 @@ async function handleApi(req, env) {
       Math.max(1, Number(b.max_workers != null ? b.max_workers : row.max_workers) || 2)
     );
 
+    let proxy_id = b.proxy_id != null ? b.proxy_id : row.proxy_id;
+    let proxy_provider = b.proxy_provider || row.proxy_provider || "proxyxoay_net";
+    let proxy_api_key =
+      b.proxy_api_key != null ? b.proxy_api_key : row.proxy_api_key;
+    let proxy_username =
+      b.proxy_username != null ? b.proxy_username : row.proxy_username;
+    let proxy_password = b.proxy_password || "";
+    let proxy_host = b.proxy_host != null ? b.proxy_host : row.proxy_host;
+    let proxy_port =
+      b.proxy_port != null ? Number(b.proxy_port) : row.proxy_port;
+    let proxy_label =
+      b.proxy_label != null ? b.proxy_label : row.proxy_label;
+
+    // When proxy_id changes (or set), copy full creds from pool (net/shop)
+    if (b.proxy_id != null) {
+      if (!b.proxy_id) {
+        proxy_id = "";
+        proxy_provider = "proxyxoay_net";
+        proxy_api_key = "";
+        proxy_username = "";
+        proxy_password = "";
+        proxy_host = "";
+        proxy_port = 0;
+        proxy_label = "";
+      } else {
+        const px = await env.DB.prepare("SELECT * FROM proxies WHERE id = ?")
+          .bind(b.proxy_id)
+          .first();
+        if (px) {
+          proxy_id = px.id;
+          proxy_provider = px.provider || "proxyxoay_net";
+          proxy_api_key = px.api_key || "";
+          proxy_username = px.username || "";
+          proxy_password = px.password || "";
+          proxy_host = px.host || "";
+          proxy_port = Number(px.port) || 0;
+          proxy_label = px.label || "";
+        }
+      }
+    }
+
     await env.DB.prepare(
       `UPDATE accounts SET
         role=?, enabled=?, note=?,
@@ -372,15 +783,15 @@ async function handleApi(req, env) {
         package_name,
         char_quota,
         max_workers,
-        b.proxy_id != null ? b.proxy_id : row.proxy_id,
-        b.proxy_provider || row.proxy_provider,
-        b.proxy_api_key != null ? b.proxy_api_key : row.proxy_api_key,
-        b.proxy_username != null ? b.proxy_username : row.proxy_username,
-        b.proxy_password || "",
-        b.proxy_password || "",
-        b.proxy_host != null ? b.proxy_host : row.proxy_host,
-        b.proxy_port != null ? Number(b.proxy_port) : row.proxy_port,
-        b.proxy_label != null ? b.proxy_label : row.proxy_label,
+        proxy_id || "",
+        proxy_provider,
+        proxy_api_key || "",
+        proxy_username || "",
+        proxy_password,
+        proxy_password,
+        proxy_host || "",
+        Number(proxy_port) || 0,
+        proxy_label || "",
         password_salt,
         password_hash,
         b.chars_used != null ? 1 : null,
@@ -388,7 +799,7 @@ async function handleApi(req, env) {
         id
       )
       .run();
-    return json({ ok: true, id });
+    return json({ ok: true, id, proxy_id, proxy_provider });
   }
 
   if (path.startsWith("/accounts/") && method === "DELETE") {
@@ -397,15 +808,188 @@ async function handleApi(req, env) {
     return json({ ok: true });
   }
 
+  // ── account_proxies (many-to-many) ──
+  // POST /accounts/:id/proxies - thêm proxy vào account
+  if (path.startsWith("/accounts/") && path.endsWith("/proxies") && method === "POST") {
+    const parts = path.split("/");
+    const accountId = parts[2];
+    const b = await req.json();
+    const proxyId = (b.proxy_id || "").trim();
+    if (!proxyId) return err("proxy_id required");
+    
+    // Kiểm tra account tồn tại
+    const acc = await env.DB.prepare("SELECT id FROM accounts WHERE id = ?").bind(accountId).first();
+    if (!acc) return err("account not found", 404);
+    
+    // Kiểm tra proxy tồn tại
+    const px = await env.DB.prepare("SELECT id FROM proxies WHERE id = ?").bind(proxyId).first();
+    if (!px) return err("proxy not found", 404);
+    
+    // Kiểm tra đã gắn chưa
+    const existing = await env.DB.prepare(
+      "SELECT id FROM account_proxies WHERE account_id = ? AND proxy_id = ?"
+    ).bind(accountId, proxyId).first();
+    if (existing) return err("proxy already attached");
+    
+    // Lấy priority cao nhất + 1
+    const maxPrio = await env.DB.prepare(
+      "SELECT MAX(priority) as max_p FROM account_proxies WHERE account_id = ?"
+    ).bind(accountId).first();
+    const priority = (maxPrio?.max_p || 0) + 1;
+    
+    const apId = "ap_" + crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO account_proxies (id, account_id, proxy_id, priority, enabled, created_at)
+       VALUES (?, ?, ?, ?, 1, datetime('now'))`
+    ).bind(apId, accountId, proxyId, priority).run();
+    
+    return json({ ok: true, id: apId, priority });
+  }
+
+  // DELETE /accounts/:id/proxies/:proxy_id - xóa proxy khỏi account
+  if (path.startsWith("/accounts/") && path.includes("/proxies/") && method === "DELETE") {
+    const parts = path.split("/");
+    const accountId = parts[2];
+    const proxyId = parts[4];
+    
+    await env.DB.prepare(
+      "DELETE FROM account_proxies WHERE account_id = ? AND proxy_id = ?"
+    ).bind(accountId, proxyId).run();
+    
+    return json({ ok: true });
+  }
+
+  // PATCH /accounts/:id/proxies/:proxy_id - cập nhật priority/enabled
+  if (path.startsWith("/accounts/") && path.includes("/proxies/") && method === "PATCH") {
+    const parts = path.split("/");
+    const accountId = parts[2];
+    const proxyId = parts[4];
+    const b = await req.json();
+    
+    const updates = [];
+    const values = [];
+    
+    if (b.priority != null) {
+      updates.push("priority = ?");
+      values.push(Number(b.priority));
+    }
+    if (b.enabled != null) {
+      updates.push("enabled = ?");
+      values.push(b.enabled ? 1 : 0);
+    }
+    
+    if (updates.length === 0) return err("no fields to update");
+    
+    values.push(accountId, proxyId);
+    await env.DB.prepare(
+      `UPDATE account_proxies SET ${updates.join(", ")} WHERE account_id = ? AND proxy_id = ?`
+    ).bind(...values).run();
+    
+    return json({ ok: true });
+  }
+
   return err("not found", 404);
+}
+
+function isApiPath(pathname) {
+  return (
+    pathname === "/api" ||
+    pathname.startsWith("/api/") ||
+    pathname === "/admin/api" ||
+    pathname.startsWith("/admin/api/")
+  );
+}
+
+/**
+ * Map request path → asset path under public/
+ * Custom domain: /admin/ → /admin/index.html, /admin/static/* → /admin/static/*
+ * workers.dev:   / → /index.html (root copy) or /admin/*
+ */
+function assetPathFromUrl(pathname) {
+  let p = pathname || "/";
+  if (p === "/admin") return "/admin/index.html";
+  if (p === "/admin/" || p === "/admin/index.html") return "/admin/index.html";
+  // already under /admin/… keep as-is (files live in public/admin/)
+  if (p.startsWith("/admin/")) return p;
+  // workers.dev root
+  if (p === "/" || p === "") return "/index.html";
+  return p;
+}
+
+async function serveAsset(req, env, assetPath) {
+  if (!env.ASSETS) {
+    return new Response("tts-admin-web OK — set assets + D1", { status: 200 });
+  }
+  // Use a clean absolute URL so Assets doesn't inherit original /admin/ rewrite quirks
+  const assetUrl = new URL(assetPath, "https://assets.local");
+  const url = new URL(req.url);
+  assetUrl.search = url.search;
+  const res = await env.ASSETS.fetch(new Request(assetUrl.toString(), {
+    method: "GET",
+    headers: req.headers,
+  }));
+  // If Assets returns a redirect loop or miss, surface a clear error
+  if (res.status >= 300 && res.status < 400) {
+    const loc = res.headers.get("Location") || "";
+    if (assetPath.endsWith("/index.html") || assetPath.endsWith(".html")) {
+      const retry = await env.ASSETS.fetch(
+        new Request(new URL(assetPath, "https://assets.local").toString(), { method: "GET" })
+      );
+      if (retry.ok) return withNoStore(retry, assetPath);
+    }
+    return new Response(`asset redirect ${res.status} → ${loc} for ${assetPath}`, {
+      status: 502,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+  return withNoStore(res, assetPath);
+}
+
+function withNoStore(res, assetPath) {
+  const headers = new Headers(res.headers);
+  if (assetPath.endsWith(".html") || assetPath.endsWith("/")) {
+    headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    headers.set("Pragma", "no-cache");
+  }
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    const pathname = url.pathname;
 
-    // API
-    if (url.pathname.startsWith("/api/")) {
+    // Legacy Windows admin JS path — force browsers onto CF D1 UI
+    // (cached HTML still requested /static/admin/app.js and crashed on jobs_by_status)
+    if (
+      pathname === "/static/admin/app.js" ||
+      pathname.startsWith("/static/admin/app.js") ||
+      pathname === "/static/admin/index.html" ||
+      pathname === "/static/admin/" ||
+      pathname === "/static/admin"
+    ) {
+      return new Response(
+        `/* redirected to CF D1 admin */\nlocation.replace("/admin/?v=6");\n`,
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        }
+      );
+    }
+
+    // Canonical: /admin → /admin/
+    if (pathname === "/admin") {
+      const dest = new URL(url);
+      dest.pathname = "/admin/";
+      dest.search = "v=6";
+      return Response.redirect(dest.toString(), 302);
+    }
+
+    // API (/api/* or /admin/api/*)
+    if (isApiPath(pathname)) {
       try {
         return await handleApi(req, env);
       } catch (e) {
@@ -414,9 +998,7 @@ export default {
     }
 
     // Static admin UI
-    if (env.ASSETS) {
-      return env.ASSETS.fetch(req);
-    }
-    return new Response("tts-admin-web OK — set assets + D1", { status: 200 });
+    const assetPath = assetPathFromUrl(pathname);
+    return serveAsset(req, env, assetPath);
   },
 };

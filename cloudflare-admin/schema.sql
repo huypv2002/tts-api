@@ -62,9 +62,25 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(username);
 CREATE INDEX IF NOT EXISTS idx_sessions_exp ON admin_sessions(expires_at);
 
+-- Account-Proxy many-to-many (1 account có nhiều proxy keys)
+CREATE TABLE IF NOT EXISTS account_proxies (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  proxy_id TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY(proxy_id) REFERENCES proxies(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_proxies_account ON account_proxies(account_id);
+CREATE INDEX IF NOT EXISTS idx_account_proxies_proxy ON account_proxies(proxy_id);
+
 -- seed packages
 INSERT OR IGNORE INTO packages (id, name, chars, note, created_at) VALUES
   ('pkg_1m',  'Gói 1 triệu',  1000000,  '1M chars', datetime('now')),
   ('pkg_5m',  'Gói 5 triệu',  5000000,  '5M chars', datetime('now')),
   ('pkg_10m', 'Gói 10 triệu', 10000000, '10M chars', datetime('now')),
-  ('pkg_50m', 'Gói 50 triệu', 50000000, '50M chars', datetime('now'));
+  ('pkg_50m', 'Gói 50 triệu', 50000000, '50M chars', datetime('now')),
+  ('pkg_unlimited', 'Unlimited', -1, 'Không giới hạn ký tự', datetime('now'));
