@@ -287,15 +287,27 @@ async function handleApi(req, env) {
       return err("wrong username or password", 401);
     }
 
-    // resolve proxy pool slot if proxy_id is set
-    let poolRow = null;
-    if (row.proxy_id) {
-      poolRow = await env.DB.prepare(
-        "SELECT id, label, enabled, host, port, username, password, api_key, provider, note FROM proxies WHERE id = ?"
-      )
-        .bind(row.proxy_id)
-        .first();
-    }
+    // resolve proxies from account_proxies (many-to-many)
+    const proxiesResult = await env.DB.prepare(
+      `SELECT ap.proxy_id, ap.priority, ap.enabled,
+              p.label, p.provider, p.host, p.port, p.username, p.password, p.api_key
+       FROM account_proxies ap
+       LEFT JOIN proxies p ON ap.proxy_id = p.id
+       WHERE ap.account_id = ? AND ap.enabled = 1
+       ORDER BY ap.priority ASC`
+    ).bind(row.id).all();
+    
+    const proxiesList = (proxiesResult.results || []).map(p => ({
+      id: p.proxy_id,
+      label: p.label || "",
+      provider: p.provider || "proxyxoay_net",
+      host: p.host || "",
+      port: Number(p.port) || 0,
+      username: p.username || "",
+      password: p.password || "",
+      api_key: p.api_key || "",
+      priority: p.priority
+    }));
 
     await env.DB.prepare(
       "UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?"
@@ -303,15 +315,13 @@ async function handleApi(req, env) {
       .bind(row.id)
       .run();
 
-    const payload = await buildProxyPayload(row, poolRow);
-    const hasPx = hasProxyCreds(payload);
-    // Encrypt secrets for tool; do not send plain api_key/password over the wire
-    let proxy_sealed = "";
-    if (hasPx) {
+    // Encrypt all proxies for tool; do not send plain secrets over the wire
+    let proxies_sealed = "";
+    if (proxiesList.length > 0) {
       try {
-        proxy_sealed = await sealJson(payload, sealKeyFromEnv(env));
+        proxies_sealed = await sealJson({ proxies: proxiesList }, sealKeyFromEnv(env));
       } catch (e) {
-        return err("proxy seal failed: " + String(e.message || e), 500);
+        return err("proxies seal failed: " + String(e.message || e), 500);
       }
     }
 
@@ -339,14 +349,9 @@ async function handleApi(req, env) {
                 (Number(row.char_quota) || 0) - (Number(row.chars_used) || 0)
               ),
         max_workers: Math.min(5, Math.max(1, Number(row.max_workers) || 1)),
-        proxy_id: payload.id || row.proxy_id || "",
-        proxy_provider: payload.provider || "proxyxoay_net",
-        proxy_label: payload.label || "",
-        // non-secret hints only (tool decrypts full creds from proxy_sealed)
-        proxy_host_hint: payload.host || "",
-        proxy_port_hint: payload.port || 0,
-        has_proxy: hasPx,
-        proxy_sealed,
+        has_proxy: proxiesList.length > 0,
+        proxies_sealed,
+        proxies_count: proxiesList.length,
         // password material so local tool can cache offline login
         password_salt: row.password_salt,
         password_hash: row.password_hash,

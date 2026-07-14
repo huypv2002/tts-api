@@ -2,7 +2,9 @@
 """Local accounts + packages DB (JSON) — tool only."""
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -13,13 +15,77 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ACCOUNTS_FILE = os.path.join(_APP_DIR, "accounts.json")
 PROXIES_FILE = os.path.join(_APP_DIR, "proxies.json")
 PACKAGES_FILE = os.path.join(_APP_DIR, "packages.json")
+CONFIG_FILE = os.path.join(_APP_DIR, "preview_studio_config.json")
 
 MAX_WORKERS_HARD = 5
 DEFAULT_CHAR_QUOTA = 1_000_000  # 1 triệu ký tự
+UNLIMITED_CHARS = -1  # char_quota = -1 → không giới hạn
+# Must match CF Worker PROXY_SEAL_KEY (or API_SECRET / default)
+DEFAULT_PROXY_SEAL_KEY = "huytts2026"
+
+
+def is_unlimited_quota(quota) -> bool:
+    """quota <= 0 or == UNLIMITED_CHARS → unlimited."""
+    try:
+        q = int(quota)
+    except (TypeError, ValueError):
+        return False
+    return q <= 0 or q == UNLIMITED_CHARS
 
 
 def _hash_pw(password: str, salt: str) -> str:
     return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def proxy_seal_key() -> str:
+    """Seal key: env TTS_PROXY_SEAL_KEY → config → default (same as Worker)."""
+    env = (os.environ.get("TTS_PROXY_SEAL_KEY") or os.environ.get("PROXY_SEAL_KEY") or "").strip()
+    if env:
+        return env
+    try:
+        if os.path.exists(CONFIG_FILE):
+            cfg = json.loads(open(CONFIG_FILE, encoding="utf-8").read())
+            k = (cfg.get("proxy_seal_key") or "").strip()
+            if k:
+                return k
+    except Exception:
+        pass
+    return DEFAULT_PROXY_SEAL_KEY
+
+
+def _keystream(key: bytes, nonce: bytes, n: int) -> bytes:
+    out = bytearray()
+    i = 0
+    while len(out) < n:
+        ctr = i.to_bytes(4, "big")
+        out.extend(hashlib.sha256(key + nonce + ctr).digest())
+        i += 1
+    return bytes(out[:n])
+
+
+def unseal_proxy_blob(sealed_b64: str, passphrase: Optional[str] = None) -> Optional[dict]:
+    """
+    Decrypt proxy payload from CF login (seal_version=1).
+    Format: base64(nonce16 || tag16 || ciphertext)
+    """
+    raw = (sealed_b64 or "").strip()
+    if not raw:
+        return None
+    try:
+        blob = base64.b64decode(raw)
+        if len(blob) < 33:
+            return None
+        nonce, tag, ct = blob[:16], blob[16:32], blob[32:]
+        key = hashlib.sha256((passphrase or proxy_seal_key()).encode("utf-8")).digest()
+        expect = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
+        if not hmac.compare_digest(expect, tag):
+            return None
+        stream = _keystream(key, nonce, len(ct))
+        plain = bytes(a ^ b for a, b in zip(ct, stream))
+        data = json.loads(plain.decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def _read(path: str, default: dict) -> dict:
@@ -46,35 +112,55 @@ def list_packages() -> list[dict]:
 
 def ensure_default_packages() -> None:
     data = _read(PACKAGES_FILE, {"packages": []})
-    if data.get("packages"):
+    pkgs = data.setdefault("packages", [])
+    if not pkgs:
+        pkgs.extend(
+            [
+                {
+                    "id": "pkg_1m",
+                    "name": "Gói 1 triệu",
+                    "chars": 1_000_000,
+                    "note": "1.000.000 ký tự",
+                },
+                {
+                    "id": "pkg_5m",
+                    "name": "Gói 5 triệu",
+                    "chars": 5_000_000,
+                    "note": "5.000.000 ký tự",
+                },
+                {
+                    "id": "pkg_10m",
+                    "name": "Gói 10 triệu",
+                    "chars": 10_000_000,
+                    "note": "10.000.000 ký tự",
+                },
+                {
+                    "id": "pkg_50m",
+                    "name": "Gói 50 triệu",
+                    "chars": 50_000_000,
+                    "note": "50.000.000 ký tự",
+                },
+                {
+                    "id": "pkg_unlimited",
+                    "name": "Unlimited",
+                    "chars": UNLIMITED_CHARS,
+                    "note": "Không giới hạn ký tự",
+                },
+            ]
+        )
+        _write(PACKAGES_FILE, data)
         return
-    data["packages"] = [
-        {
-            "id": "pkg_1m",
-            "name": "Gói 1 triệu",
-            "chars": 1_000_000,
-            "note": "1.000.000 ký tự",
-        },
-        {
-            "id": "pkg_5m",
-            "name": "Gói 5 triệu",
-            "chars": 5_000_000,
-            "note": "5.000.000 ký tự",
-        },
-        {
-            "id": "pkg_10m",
-            "name": "Gói 10 triệu",
-            "chars": 10_000_000,
-            "note": "10.000.000 ký tự",
-        },
-        {
-            "id": "pkg_50m",
-            "name": "Gói 50 triệu",
-            "chars": 50_000_000,
-            "note": "50.000.000 ký tự",
-        },
-    ]
-    _write(PACKAGES_FILE, data)
+    # migrate: ensure unlimited package exists
+    if not any(p.get("id") == "pkg_unlimited" for p in pkgs):
+        pkgs.append(
+            {
+                "id": "pkg_unlimited",
+                "name": "Unlimited",
+                "chars": UNLIMITED_CHARS,
+                "note": "Không giới hạn ký tự",
+            }
+        )
+        _write(PACKAGES_FILE, data)
 
 
 def save_package(pkg: dict) -> dict:
@@ -193,6 +279,7 @@ def list_accounts() -> list[dict]:
 def public_account(a: dict) -> dict:
     quota = int(a.get("char_quota") or 0)
     used = int(a.get("chars_used") or 0)
+    unlimited = is_unlimited_quota(quota)
     return {
         "id": a.get("id"),
         "username": a.get("username"),
@@ -201,7 +288,8 @@ def public_account(a: dict) -> dict:
         "note": a.get("note") or "",
         "char_quota": quota,
         "chars_used": used,
-        "chars_left": max(0, quota - used),
+        "chars_left": -1 if unlimited else max(0, quota - used),
+        "unlimited": unlimited,
         "package_id": a.get("package_id") or "",
         "package_name": a.get("package_name") or "",
         "max_workers": min(MAX_WORKERS_HARD, max(1, int(a.get("max_workers") or 1))),
@@ -209,6 +297,7 @@ def public_account(a: dict) -> dict:
         "has_proxy": bool(
             (a.get("proxy_id") and get_proxy(a.get("proxy_id") or ""))
             or (a.get("proxy_host") and a.get("proxy_username"))
+            or a.get("proxy_api_key")
         ),
         "proxy_host": a.get("proxy_host") or "",
         "proxy_port": int(a.get("proxy_port") or 0),
@@ -270,8 +359,216 @@ def create_account(
     return public_account(row)
 
 
+# Web admin (Cloudflare D1) — accounts created on web login here
+AUTH_API_BASES = [
+    b.rstrip("/")
+    for b in (
+        os.environ.get("TTS_AUTH_API", "").strip(),
+        "https://tts-origin.liveyt.pro/admin/api",
+        "https://tts-admin-web.kh431248.workers.dev/api",
+    )
+    if b and b.strip()
+]
+# de-dupe preserve order
+_seen: set[str] = set()
+AUTH_API_BASES = [b for b in AUTH_API_BASES if not (b in _seen or _seen.add(b))]  # type: ignore[func-returns-value]
+
+
+def _apply_proxy_payload(row: dict, px: dict) -> dict:
+    """Merge decrypted proxy payload into account row + proxies.json."""
+    if not px:
+        return row
+    uid = row.get("id") or "acc"
+    px_id = px.get("id") or row.get("proxy_id") or f"acc_{str(uid)[:8]}"
+    provider = px.get("provider") or "proxyxoay_net"
+    row["proxy_id"] = px_id
+    row["proxy_provider"] = provider
+    row["proxy_api_key"] = px.get("api_key") or ""
+    row["proxy_username"] = px.get("username") or ""
+    row["proxy_password"] = px.get("password") or ""
+    row["proxy_host"] = px.get("host") or ""
+    row["proxy_port"] = int(px.get("port") or 0)
+    row["proxy_label"] = px.get("label") or px_id
+    row["shop_nhamang"] = px.get("shop_nhamang") or "random"
+    row["shop_tinhthanh"] = px.get("shop_tinhthanh", 0)
+    row["shop_whitelist"] = px.get("shop_whitelist") or ""
+    row["shop_method"] = px.get("shop_method") or "GET"
+
+    pdata = _read(PROXIES_FILE, {"proxies": []})
+    proxies = pdata.setdefault("proxies", [])
+    note = f"from account {row.get('username')}"
+    if "shop" in str(provider).lower():
+        note = (
+            f"SHOP|nhamang={row['shop_nhamang']}|"
+            f"tinhthanh={row['shop_tinhthanh']}|"
+            f"whitelist={row['shop_whitelist']}|"
+            f"method={row['shop_method']}"
+        )
+    entry = {
+        "id": px_id,
+        "label": row["proxy_label"],
+        "enabled": True,
+        "provider": provider,
+        "host": row["proxy_host"],
+        "port": row["proxy_port"],
+        "username": row["proxy_username"],
+        "password": row["proxy_password"],
+        "api_key": row["proxy_api_key"],
+        "shop_nhamang": row["shop_nhamang"],
+        "shop_tinhthanh": row["shop_tinhthanh"],
+        "shop_whitelist": row["shop_whitelist"],
+        "shop_method": row["shop_method"],
+        "note": note,
+    }
+    hit = False
+    for j, p in enumerate(proxies):
+        if p.get("id") == px_id:
+            proxies[j] = {**p, **entry}
+            hit = True
+            break
+    if not hit:
+        proxies.append(entry)
+    # Prefer assigned account proxy: enable it, keep others as configured
+    _write(PROXIES_FILE, pdata)
+    return row
+
+
+def _upsert_remote_account(account: dict, password: str) -> dict:
+    """Cache D1 account into local accounts.json (incl. hash for offline)."""
+    data = _load()
+    accounts = data.setdefault("accounts", [])
+    uid = account.get("id") or secrets.token_hex(8)
+    salt = account.get("password_salt") or secrets.token_hex(8)
+    phash = account.get("password_hash") or _hash_pw(password, salt)
+
+    # Decrypt sealed proxies list from web login (many-to-many)
+    sealed_proxies = account.get("proxies_sealed") or ""
+    proxies_list = []
+    if sealed_proxies:
+        payload = unseal_proxy_blob(str(sealed_proxies))
+        if payload and isinstance(payload.get("proxies"), list):
+            proxies_list = payload["proxies"]
+    
+    # Legacy: single proxy_sealed (backward compat)
+    if not proxies_list:
+        sealed = account.get("proxy_sealed") or ""
+        px_payload = unseal_proxy_blob(str(sealed)) if sealed else None
+        if px_payload and isinstance(px_payload, dict):
+            proxies_list = [px_payload]
+
+    row: dict[str, Any] = {
+        "id": uid,
+        "username": account.get("username"),
+        "password_salt": salt,
+        "password_hash": phash,
+        "role": account.get("role") or "user",
+        "enabled": bool(account.get("enabled", True)),
+        "note": account.get("note") or "",
+        "created_at": account.get("created_at")
+        or time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "char_quota": int(account.get("char_quota") or DEFAULT_CHAR_QUOTA),
+        "chars_used": int(account.get("chars_used") or 0),
+        "package_id": account.get("package_id") or "",
+        "package_name": account.get("package_name") or "",
+        "max_workers": min(
+            MAX_WORKERS_HARD, max(1, int(account.get("max_workers") or 1))
+        ),
+        "proxies": proxies_list,  # Store full proxies list
+        "has_proxy": len(proxies_list) > 0,
+        "source": "cloudflare-d1",
+    }
+
+    found = False
+    for i, a in enumerate(accounts):
+        if a.get("username") == row["username"] or a.get("id") == uid:
+            # keep local chars_used if higher? prefer remote
+            accounts[i] = {**a, **row}
+            row = accounts[i]
+            found = True
+            break
+    if not found:
+        accounts.append(row)
+    _save(data)
+    return dict(row)
+
+
+def authenticate_remote(username: str, password: str) -> Optional[dict]:
+    """Login against Cloudflare D1 (web-created accounts)."""
+    import urllib.error
+    import urllib.request
+
+    payload = json.dumps(
+        {"username": username, "password": password}
+    ).encode("utf-8")
+    # CF Bot Fight blocks default Python-urllib UA (error 1010) — spoof curl
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "curl/8.7.1",
+    }
+    last_net_err: Optional[Exception] = None
+    wrong_password = False
+
+    for base in AUTH_API_BASES:
+        url = f"{base}/user/login"
+        req = urllib.request.Request(
+            url, data=payload, headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8")
+                detail = (
+                    json.loads(body).get("detail")
+                    if body and body.strip().startswith("{")
+                    else body
+                )
+            except Exception:
+                detail = None
+            # wrong credentials
+            if e.code == 401 and detail and "wrong" in str(detail).lower():
+                wrong_password = True
+                continue
+            if e.code in (401, 403):
+                # may be wrong route / bot — try next base
+                last_net_err = RuntimeError(detail or f"HTTP {e.code}")
+                continue
+            last_net_err = RuntimeError(detail or f"auth server HTTP {e.code}")
+            continue
+        except Exception as e:
+            last_net_err = e
+            continue
+
+        if data.get("ok") and data.get("account"):
+            return _upsert_remote_account(data["account"], password)
+
+    if wrong_password:
+        return None
+    if last_net_err is not None:
+        raise RuntimeError(
+            f"không kết nối được server account: {last_net_err}"
+        ) from last_net_err
+    return None
+
+
 def authenticate(username: str, password: str) -> Optional[dict]:
+    """Try Cloudflare D1 first (web accounts), then local accounts.json."""
     username = (username or "").strip()
+    if not username or not password:
+        return None
+
+    # 1) Remote D1 (accounts created on web admin)
+    remote_err: Optional[Exception] = None
+    try:
+        remote = authenticate_remote(username, password)
+        if remote:
+            return remote
+    except Exception as e:
+        remote_err = e
+
+    # 2) Local JSON fallback (admin / offline cache)
     for a in _load().get("accounts") or []:
         if a.get("username") != username:
             continue
@@ -281,6 +578,10 @@ def authenticate(username: str, password: str) -> Optional[dict]:
         if a.get("password_hash") == _hash_pw(password, salt):
             return dict(a)
         return None
+
+    # wrong password remote+local — if network failed, surface that
+    if remote_err is not None:
+        raise remote_err
     return None
 
 
@@ -360,19 +661,24 @@ def consume_chars(account_id: str, n: int) -> tuple[bool, str]:
             continue
         quota = int(a.get("char_quota") or 0)
         used = int(a.get("chars_used") or 0)
-        if used + n > quota:
-            return False, f"hết gói ký tự ({used}/{quota})"
+        # unlimited: vẫn cộng used để thống kê, không chặn
+        if not is_unlimited_quota(quota) and used + n > quota:
+            return False, f"Hết gói ký tự (đã dùng {used}/{quota})"
         a["chars_used"] = used + n
         _save(data)
         return True, "ok"
-    return False, "account not found"
+    return False, "Không tìm thấy tài khoản"
 
 
 def check_chars(account: dict, n: int) -> tuple[bool, str]:
     quota = int(account.get("char_quota") or 0)
     used = int(account.get("chars_used") or 0)
+    if is_unlimited_quota(quota) or account.get("unlimited"):
+        return True, "ok"
     if used + n > quota:
-        return False, f"hết gói ký tự (còn {max(0, quota-used)}, cần {n})"
+        return False, (
+            f"Hết gói ký tự (còn {max(0, quota - used):,}, cần {n:,} ký tự)"
+        )
     return True, "ok"
 
 
@@ -437,3 +743,102 @@ def resolve_proxy_for_account(account: dict) -> Optional[str]:
 # backward-compat alias
 def build_proxy_url(account: dict) -> Optional[str]:
     return resolve_proxy_for_account(account)
+
+
+def list_proxy_lines_for_gen(
+    account: dict | None = None,
+    max_lanes: int = 5,
+) -> list[dict]:
+    """
+    Build proxy lines for multi-lane gen.
+    1) Account-bound proxy first (from login decrypt)
+    2) Other enabled proxies in pool (scale multi-key)
+    """
+    max_n = max(1, min(5, int(max_lanes or 1)))
+    lines: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(p: dict) -> None:
+        if not p or not p.get("enabled", True):
+            return
+        pid = str(p.get("id") or "")
+        key = (p.get("api_key") or "").strip()
+        host = (p.get("host") or "").strip()
+        prov = (p.get("provider") or "proxyxoay_net").lower()
+        dedupe = pid or key or f"{host}:{p.get('port')}"
+        if not dedupe or dedupe in seen:
+            return
+        # shop / net with key OK; static needs host:port
+        if "shop" in prov:
+            if not key:
+                return
+        elif not key and not (host and int(p.get("port") or 0)):
+            return
+        seen.add(dedupe)
+        lines.append(
+            {
+                "id": pid or f"px_{len(lines)+1}",
+                "label": p.get("label") or pid or host or "proxy",
+                "enabled": True,
+                "provider": p.get("provider") or "proxyxoay_net",
+                "host": host,
+                "port": int(p.get("port") or 0),
+                "username": p.get("username") or "",
+                "password": p.get("password") or "",
+                "api_key": key,
+                "shop_nhamang": p.get("shop_nhamang") or p.get("nhamang") or "random",
+                "shop_tinhthanh": p.get("shop_tinhthanh")
+                if p.get("shop_tinhthanh") is not None
+                else p.get("tinhthanh", 0),
+                "shop_whitelist": p.get("shop_whitelist") or p.get("whitelist") or "",
+                "shop_method": p.get("shop_method") or "GET",
+                "note": p.get("note") or "",
+            }
+        )
+
+    # 0) NEW: account["proxies"] list from Cloudflare sync (many-to-many)
+    if account:
+        account_proxies = account.get("proxies") or []
+        for p in account_proxies:
+            if len(lines) >= max_n:
+                break
+            _add(p)
+    
+    # 1) LEGACY: account-bound single proxy (backward compat)
+    if account and len(lines) < max_n:
+        pid = account.get("proxy_id") or ""
+        if pid:
+            px = get_proxy(pid)
+            if px:
+                _add(px)
+        if not lines and (
+            account.get("proxy_api_key")
+            or (account.get("proxy_host") and account.get("proxy_port"))
+        ):
+            _add(
+                {
+                    "id": account.get("proxy_id") or "acc_proxy",
+                    "label": account.get("proxy_label") or "account",
+                    "enabled": True,
+                    "provider": account.get("proxy_provider") or "proxyxoay_net",
+                    "host": account.get("proxy_host") or "",
+                    "port": int(account.get("proxy_port") or 0),
+                    "username": account.get("proxy_username") or "",
+                    "password": account.get("proxy_password") or "",
+                    "api_key": account.get("proxy_api_key") or "",
+                    "shop_nhamang": account.get("shop_nhamang") or "random",
+                    "shop_tinhthanh": account.get("shop_tinhthanh", 0),
+                    "shop_whitelist": account.get("shop_whitelist") or "",
+                    "shop_method": account.get("shop_method") or "GET",
+                }
+            )
+
+    # 2) FALLBACK: local proxies.json pool (if account has no proxies)
+    if not lines:
+        data = _read(PROXIES_FILE, {"proxies": []})
+        for p in data.get("proxies") or []:
+            if len(lines) >= max_n:
+                break
+            _add(p)
+
+    return lines[:max_n]
