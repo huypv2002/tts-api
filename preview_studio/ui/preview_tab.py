@@ -191,60 +191,22 @@ class BatchWorker(QThread):
                 }
 
         jobs = []
-        # Split each chunk by "," and "." into sub-fragments
-        # Each sub-fragment becomes a TTS job
-        # After all sub-fragments of a chunk done → merge with 0.5s silence → doan_N.mp3
-        # After all chunks done → merge with 1s silence → final.mp3
-        chunk_sub_count: dict[int, int] = {}  # chunk_idx → number of sub-fragments
-        chunk_sub_done: dict[int, int] = {}  # chunk_idx → completed sub-fragments
-        chunk_sub_paths: dict[int, list[str]] = {}  # chunk_idx → list of sub-fragment paths
-        sub_lock = threading.Lock()
-        
         for i, ch in enumerate(self.chunks):
             text = ch.get("text") or ""
             fname = ch.get("file") or "doan.txt"
             part = int(ch.get("part") or (i + 1))
-            chunk_out = ch.get("out_path") or doan_path(self.output_dir, fname, part)
-            # ensure parent dir
-            Path(chunk_out).parent.mkdir(parents=True, exist_ok=True)
-            ch["out_path"] = chunk_out
-            
-            # Split text by "," and "." (keep punctuation with preceding text)
-            sub_fragments = []
-            parts = re.split(r'([,.])', text)
-            j = 0
-            while j < len(parts):
-                frag = parts[j].strip()
-                if j + 1 < len(parts) and parts[j + 1] in ",.":
-                    frag += parts[j + 1]
-                    j += 2
-                else:
-                    j += 1
-                if frag:
-                    sub_fragments.append(frag)
-            
-            # If no sub-fragments (empty text), use original text
-            if not sub_fragments:
-                sub_fragments = [text]
-            
-            chunk_sub_count[i] = len(sub_fragments)
-            chunk_sub_done[i] = 0
-            chunk_sub_paths[i] = []
-            
-            # Create a job for each sub-fragment
-            for si, sf in enumerate(sub_fragments):
-                sub_out = chunk_out.replace(".mp3", f"_sub{si}.mp3")
-                jobs.append({
-                    "row": i,
-                    "text": sf,
-                    "out_path": sub_out,
-                    "file": fname,
-                    "part": part,
-                    "chunk_idx": i,
-                    "sub_idx": si,
-                })
+            out = ch.get("out_path") or doan_path(self.output_dir, fname, part)
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            ch["out_path"] = out
+            jobs.append({
+                "row": i,
+                "text": text,
+                "out_path": out,
+                "file": fname,
+                "part": part,
+            })
         
-        total = len(jobs)  # total sub-fragment jobs
+        total = len(self.chunks)
 
         def on_start(row: int):
             if self._stop:
@@ -283,52 +245,31 @@ class BatchWorker(QThread):
             ch = self.chunks[row] if 0 <= row < len(self.chunks) else {}
             fname = ch.get("file") or ""
             if success:
-                # This is a sub-fragment, track it
-                chunk_idx = row
-                with sub_lock:
-                    if path and os.path.isfile(path):
-                        chunk_sub_paths[chunk_idx].append(path)
-                        chunk_sub_done[chunk_idx] += 1
-                        done_count = chunk_sub_done[chunk_idx]
-                        total_count = chunk_sub_count[chunk_idx]
-                        sub_paths = list(chunk_sub_paths[chunk_idx])
-                    else:
-                        done_count = 0
-                        total_count = 0
-                        sub_paths = []
+                # Post-process: split MP3 at punctuation timestamps (ratio-based) → concat with 0.5s silence
+                if path and os.path.isfile(path):
+                    from output_layout import insert_punctuation_silence
+                    text = ch.get("text") or ""
+                    ok_p = insert_punctuation_silence(path, text, SILENT_05S_PATH)
+                    if ok_p:
+                        self.log.emit(f"🔇 {fname} doan_{ch.get('part') or row+1}: inserted silence at punctuation")
                 
-                # Check if all sub-fragments of this chunk are done
-                if done_count == total_count and total_count > 0:
-                    # Merge all sub-fragments with 0.5s silence
-                    chunk_out = ch.get("out_path")
-                    
-                    if len(sub_paths) == 1:
-                        # Only one sub-fragment, just copy it
-                        try:
-                            import shutil
-                            shutil.copy2(sub_paths[0], chunk_out)
-                            self.log.emit(f"✅ {fname} doan_{ch.get('part') or row+1} → {os.path.basename(chunk_out)}")
-                        except Exception as e:
-                            self.log.emit(f"⚠ Copy failed: {e}")
-                    else:
-                        # Merge with 0.5s silence between sub-fragments
-                        ok_m, msg = concat_with_silence(sub_paths, chunk_out, SILENT_05S_PATH)
-                        if ok_m:
-                            self.log.emit(f"✅ {fname} doan_{ch.get('part') or row+1} → {msg}")
-                        else:
-                            self.log.emit(f"⚠ Merge sub-fragments failed: {msg}")
-                    
-                    self.row_status.emit(row, "Xong")
-                    self.row_done.emit(row, True, chunk_out, "")
-                    
-                    # Check if all chunks of this file are done
-                    if fname in file_pending:
-                        file_pending[fname] = max(0, file_pending[fname] - 1)
-                        if file_pending[fname] == 0:
-                            try_merge_file(fname)
-                else:
-                    # Still waiting for more sub-fragments
-                    self.row_status.emit(row, f"Sub {done_count}/{total_count}")
+                if path:
+                    ch["path"] = path
+                self.row_status.emit(row, "Xong")
+                self.row_done.emit(row, True, path, "")
+                rel = path
+                try:
+                    rel = os.path.relpath(path, self.output_dir) if path else ""
+                except Exception:
+                    rel = os.path.basename(path) if path else ""
+                self.log.emit(
+                    f"✅ {fname} doan_{ch.get('part') or row+1} → {rel}"
+                )
+                # merge when last chunk of this file finishes
+                if fname in file_pending:
+                    file_pending[fname] = max(0, file_pending[fname] - 1)
+                    if file_pending[fname] == 0:
+                        try_merge_file(fname)
             else:
                 self.row_status.emit(row, "Lỗi")
                 self.row_done.emit(row, False, "", err)

@@ -132,6 +132,117 @@ def find_ffmpeg() -> Optional[str]:
     return None
 
 
+def insert_punctuation_silence(
+    mp3_path: str,
+    text: str,
+    silent_path: str,
+) -> bool:
+    """
+    Split MP3 at punctuation positions ("," and ".") using ratio-based timestamps,
+    then concatenate parts with silence between them.
+    
+    Example: "con chó, đang cười. Con mèo, đang khóc"
+    → split at timestamps of "," and "."
+    → concat: [con chó] + 0.5s + [đang cười] + 0.5s + [Con mèo] + 0.5s + [đang khóc]
+    """
+    if not silent_path or not os.path.isfile(silent_path):
+        return False
+    if not mp3_path or not os.path.isfile(mp3_path):
+        return False
+    
+    # Find punctuation positions in text
+    punct_positions = []  # list of (char_index, punct_char)
+    for i, ch in enumerate(text):
+        if ch in ",.":
+            punct_positions.append((i, ch))
+    
+    if not punct_positions:
+        return False  # No punctuation, nothing to do
+    
+    # Get MP3 duration using ffprobe
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        return False
+    
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", mp3_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            return False
+        duration = float(r.stdout.strip())
+        if duration <= 0:
+            return False
+    except Exception:
+        return False
+    
+    # Calculate timestamps based on character ratios
+    total_chars = len(text)
+    timestamps = []  # list of (start, end) for each segment
+    prev_pos = 0
+    
+    for pos, punct in punct_positions:
+        # Segment from prev_pos to pos+1 (including punctuation)
+        seg_start_ratio = prev_pos / total_chars
+        seg_end_ratio = (pos + 1) / total_chars
+        timestamps.append((seg_start_ratio * duration, seg_end_ratio * duration))
+        prev_pos = pos + 1
+    
+    # Last segment (if any text after last punctuation)
+    if prev_pos < total_chars:
+        seg_start_ratio = prev_pos / total_chars
+        timestamps.append((seg_start_ratio * duration, duration))
+    
+    if not timestamps:
+        return False
+    
+    # If only 1 segment, no need to split
+    if len(timestamps) == 1:
+        return False
+    
+    # Split MP3 at timestamps using ffmpeg
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return False
+    
+    tmp_dir = tempfile.mkdtemp(prefix="tts_punct_")
+    part_paths = []
+    
+    try:
+        for i, (start, end) in enumerate(timestamps):
+            part_path = os.path.join(tmp_dir, f"part_{i:03d}.mp3")
+            cmd = [
+                ffmpeg, "-y",
+                "-ss", f"{start:.3f}",
+                "-to", f"{end:.3f}",
+                "-i", mp3_path,
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                part_path
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if r.returncode == 0 and os.path.isfile(part_path) and os.path.getsize(part_path) > 500:
+                part_paths.append(part_path)
+        
+        if len(part_paths) < 2:
+            return False  # Need at least 2 parts to insert silence
+        
+        # Concat parts with silence between them
+        ok, msg = concat_with_silence(part_paths, mp3_path, silent_path)
+        return ok
+    
+    except Exception:
+        return False
+    finally:
+        # Cleanup temp files
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def concat_with_silence(
     paths: list[str],
     out_mp3: str,
