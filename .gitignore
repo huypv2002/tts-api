@@ -29,6 +29,7 @@ widget_profile/
 
 # generated media / lab dumps
 *.mp3
+!preview_studio/silent_*.mp3
 *.png
 tts_loop_1000/
 tts_loop_1000_archive/
