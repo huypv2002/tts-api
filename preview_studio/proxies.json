@@ -1,0 +1,20 @@
+{
+  "proxies": [
+    {
+      "id": "px_eu1",
+      "label": "EU vipvn7",
+      "enabled": true,
+      "provider": "proxyxoay_net",
+      "host": "vipvn7.proxyxoay.net",
+      "port": 8978,
+      "username": "qfHFpUiY",
+      "password": "V6bqZJCF",
+      "api_key": "62931536-e26e-4e51-a3e9-b8498db544db",
+      "shop_nhamang": "random",
+      "shop_tinhthanh": 0,
+      "shop_whitelist": "",
+      "shop_method": "GET",
+      "note": "from account huyem"
+    }
+  ]
+}

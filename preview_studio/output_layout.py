@@ -132,16 +132,65 @@ def find_ffmpeg() -> Optional[str]:
     return None
 
 
+def ensure_silence_mp3(seconds: float = 1.5, studio_dir: str = "") -> str:
+    """
+    Create/cache silent MP3 for gap between chunks (same idea as 11Labs0811.create_silence_mp3).
+    Default 1.5s — typical pause between doan_* when merging.
+    Returns path or "" if ffmpeg unavailable.
+    """
+    seconds = float(seconds or 0)
+    if seconds <= 0:
+        return ""
+    root = studio_dir or os.path.dirname(os.path.abspath(__file__))
+    # e.g. silent_1_5s.mp3
+    name = f"silent_{str(seconds).replace('.', '_')}s.mp3"
+    out = os.path.join(root, name)
+    if os.path.isfile(out) and os.path.getsize(out) > 500:
+        return out
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        # fallback to pre-shipped 1s if close enough
+        fallback = os.path.join(root, "silent_1s.mp3")
+        return fallback if os.path.isfile(fallback) else ""
+    try:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=mono:sample_rate=44100",
+            "-t",
+            str(seconds),
+            "-acodec",
+            "libmp3lame",
+            "-ar",
+            "44100",
+            "-b:a",
+            "128k",
+            out,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 200:
+            return out
+    except Exception:
+        pass
+    fallback = os.path.join(root, "silent_1s.mp3")
+    return fallback if os.path.isfile(fallback) else ""
+
+
 def merge_doan_mp3s(
     file_dir: str,
     out_mp3: str,
     *,
     expected_parts: int = 0,
     silent_between: str = "",
+    silence_seconds: float = 1.5,
 ) -> tuple[bool, str]:
     """
     Ghép doan_1..N → out_mp3.
-    silent_between: path to silent MP3 to insert between parts (e.g. silent_1s.mp3)
+    silent_between: path to silent MP3 (optional).
+    silence_seconds: if silent_between empty, auto-generate silence (default 1.5s like 11Labs gap).
     Returns (ok, message).
     """
     parts = list_doan_files(file_dir)
@@ -150,13 +199,19 @@ def merge_doan_mp3s(
     if expected_parts > 0 and len(parts) < expected_parts:
         return False, f"chưa đủ đoạn ({len(parts)}/{expected_parts})"
 
-    # Build concat list with optional silence between
-    has_silent = silent_between and os.path.isfile(silent_between)
+    # Resolve silence file (prefer explicit path, else generate 1.5s)
+    silence_path = silent_between if silent_between and os.path.isfile(silent_between) else ""
+    if not silence_path and silence_seconds and silence_seconds > 0 and len(parts) > 1:
+        silence_path = ensure_silence_mp3(
+            silence_seconds, studio_dir=os.path.dirname(os.path.abspath(__file__))
+        )
+
+    has_silent = bool(silence_path and os.path.isfile(silence_path))
     concat_list: list[str] = []
     for i, p in enumerate(parts):
         concat_list.append(p)
         if has_silent and i < len(parts) - 1:
-            concat_list.append(silent_between)
+            concat_list.append(silence_path)
 
     if len(concat_list) == 1 and not has_silent:
         try:

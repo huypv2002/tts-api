@@ -22,9 +22,10 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 import accounts_store as accounts  # noqa: E402
+from ui.edit_mp3_tab import EditMp3Tab  # noqa: E402
 from ui.preview_tab import PreviewTab  # noqa: E402
 
-APP_NAME = "HuyViet Preview Studio"
+APP_NAME = "Bubble TTS Elevenlabs Unlimited Preview Studio"
 LOGIN_TEMP_FILE = os.path.join(_APP_DIR, "login_temp.json")
 CONFIG_FILE = os.path.join(_APP_DIR, "preview_studio_config.json")
 
@@ -38,11 +39,21 @@ def load_config() -> dict:
         pass
     return {
         "output_dir": os.path.join(_APP_DIR, "output"),
-        "max_chars": 900,
-        "workers": 2,
-        "hsw_workers": 2,
+        "max_chars": 300,  # chunk size — max ký tự/đoạn
+        "workers": 5,  # TTS threads hard max (capped by account max_workers)
+        "hsw_workers": 5,
         "voice_id": "NOpBlnGInO9m6vDvFkFC",
         "lang": "en",
+        "speed": 1.0,
+        "stability": 0.5,
+        "similarity_boost": 0.75,
+        "voices": [
+            {
+                "name": "Giọng mặc định",
+                "voice_id": "NOpBlnGInO9m6vDvFkFC",
+                "lang": "en",
+            }
+        ],
     }
 
 
@@ -88,101 +99,109 @@ class LoginDialog(QtWidgets.QDialog):
         accounts.ensure_default_account()
         saved = _load_login_temp()
         self.user = None
-        self.setWindowTitle("HuyViet Preview Studio - Đăng nhập")
+        self.setWindowTitle("Bubble TTS Elevenlabs Unlimited Preview Studio - Đăng nhập")
         self.setModal(True)
-        self.setFixedSize(450, 480)
+        # Taller card — fixed size was too short / cramped on HiDPI
+        self.setFixedSize(480, 640)
+        self.setMinimumSize(480, 640)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint)
         self.setStyleSheet(
             """
             QDialog {
                 background: #ffffff;
-                border-radius: 12px;
+                border-radius: 16px;
                 border: 1px solid #cfcfcf;
             }
             QLabel { color: #171717; font-size: 13px; background: transparent; }
             QLineEdit {
                 background-color: #ffffff; border: 1px solid #c9c9c9;
-                border-radius: 7px; padding: 14px 18px; color: #171717; font-size: 14px;
+                border-radius: 10px; padding: 16px 18px; color: #171717; font-size: 15px;
+                min-height: 22px;
             }
-            QLineEdit:focus { border: 1px solid #171717; }
+            QLineEdit:focus { border: 1.5px solid #171717; }
             QPushButton {
-                border-radius: 7px; padding: 14px 30px; font-size: 14px; font-weight: 500;
+                border-radius: 10px; padding: 14px 30px; font-size: 14px; font-weight: 600;
             }
             """
         )
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(40, 25, 40, 30)
+        layout.setContentsMargins(44, 28, 44, 32)
         layout.setSpacing(0)
 
         close_layout = QtWidgets.QHBoxLayout()
         close_layout.addStretch()
         btn_close = QtWidgets.QPushButton("✕")
-        btn_close.setFixedSize(32, 32)
+        btn_close.setFixedSize(36, 36)
         btn_close.setCursor(QtCore.Qt.PointingHandCursor)
         btn_close.setStyleSheet(
-            "QPushButton { background: transparent; color: #737373; border: none; font-size: 18px; }"
+            "QPushButton { background: transparent; color: #737373; border: none; font-size: 18px; border-radius: 8px; }"
             "QPushButton:hover { color: #171717; background: #f0f0f0; }"
         )
         btn_close.clicked.connect(self.reject)
         btn_close.setAutoDefault(False)
         close_layout.addWidget(btn_close)
         layout.addLayout(close_layout)
-        layout.addSpacing(10)
+        layout.addSpacing(8)
 
         icon_label = QtWidgets.QLabel("PREVIEW")
         icon_label.setStyleSheet(
-            "font-size: 11px; color: #ffffff; background: #171717;"
-            "border-radius: 14px; padding: 7px 12px;"
+            "font-size: 12px; font-weight: 700; letter-spacing: 1px; color: #ffffff; background: #171717;"
+            "border-radius: 16px; padding: 10px 16px;"
         )
         icon_label.setAlignment(QtCore.Qt.AlignCenter)
-        icon_label.setFixedWidth(88)
+        icon_label.setFixedHeight(36)
+        icon_label.setFixedWidth(108)
         icon_row = QtWidgets.QHBoxLayout()
         icon_row.addStretch()
         icon_row.addWidget(icon_label)
         icon_row.addStretch()
         layout.addLayout(icon_row)
-        layout.addSpacing(12)
+        layout.addSpacing(18)
 
-        title = QtWidgets.QLabel("HUYVIET PREVIEW STUDIO")
+        title = QtWidgets.QLabel("Bubble TTS Elevenlabs Unlimited PREVIEW STUDIO")
         title.setStyleSheet(
-            "font-size: 18px; font-weight: 600; color: #171717; background: transparent;"
+            "font-size: 20px; font-weight: 700; color: #171717; background: transparent;"
         )
         title.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(title)
-        layout.addSpacing(6)
+        layout.addSpacing(8)
 
         subtitle = QtWidgets.QLabel("Đăng nhập để tiếp tục")
-        subtitle.setStyleSheet("color: #737373; font-size: 12px;")
+        subtitle.setStyleSheet("color: #737373; font-size: 13px;")
         subtitle.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(subtitle)
-        layout.addSpacing(22)
+        layout.addSpacing(28)
 
         self.ed_username = QtWidgets.QLineEdit()
         self.ed_username.setPlaceholderText("👤  Tên đăng nhập")
-        self.ed_username.setMinimumHeight(50)
-        self.ed_username.setText(saved.get("username") or "admin")
+        self.ed_username.setMinimumHeight(56)
+        # Auto-fill last login (login_temp.json) — không hardcode admin
+        self.ed_username.setText(saved.get("username") or "")
+        self.ed_username.setPlaceholderText("👤  Tên đăng nhập")
         layout.addWidget(self.ed_username)
-        layout.addSpacing(14)
+        layout.addSpacing(16)
 
         self.ed_password = QtWidgets.QLineEdit()
         self.ed_password.setEchoMode(QtWidgets.QLineEdit.Password)
         self.ed_password.setPlaceholderText("🔒  Mật khẩu")
-        self.ed_password.setMinimumHeight(50)
-        self.ed_password.setText(saved.get("password") or "admin123")
+        self.ed_password.setMinimumHeight(56)
+        self.ed_password.setText(saved.get("password") or "")
         layout.addWidget(self.ed_password)
-        layout.addSpacing(10)
-
-        self.lbl_error = QtWidgets.QLabel("")
-        self.lbl_error.setStyleSheet("color: #991b1b; font-size: 12px; padding: 5px;")
-        self.lbl_error.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_error.setWordWrap(True)
-        self.lbl_error.setVisible(False)
-        layout.addWidget(self.lbl_error)
         layout.addSpacing(12)
 
+        # Always reserve error line height so layout never "jumps" / clips
+        self.lbl_error = QtWidgets.QLabel("")
+        self.lbl_error.setStyleSheet("color: #991b1b; font-size: 12px; padding: 4px 2px;")
+        self.lbl_error.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_error.setWordWrap(True)
+        self.lbl_error.setMinimumHeight(36)
+        self.lbl_error.setVisible(True)
+        layout.addWidget(self.lbl_error)
+        layout.addSpacing(10)
+
         self.bt_login = QtWidgets.QPushButton("ĐĂNG NHẬP")
-        self.bt_login.setMinimumHeight(52)
+        self.bt_login.setMinimumHeight(56)
         self.bt_login.setCursor(QtCore.Qt.PointingHandCursor)
         self.bt_login.setStyleSheet(
             "QPushButton { background: #171717; color: #ffffff; border: 1px solid #171717; }"
@@ -191,34 +210,25 @@ class LoginDialog(QtWidgets.QDialog):
         )
         layout.addWidget(self.bt_login)
         self.bt_login.setDefault(True)
-        layout.addSpacing(12)
+        layout.addSpacing(16)
 
-        self.bt_register = QtWidgets.QPushButton("Tạo account mới")
-        self.bt_register.setMinimumHeight(40)
-        self.bt_register.setCursor(QtCore.Qt.PointingHandCursor)
-        self.bt_register.setStyleSheet(
-            "QPushButton { background: #ffffff; color: #171717; border: 1px solid #c9c9c9; }"
-            "QPushButton:hover { background: #f0f0f0; border: 1px solid #171717; }"
-        )
-        layout.addWidget(self.bt_register)
-        layout.addSpacing(10)
-
+        # Không self-register — chỉ admin tạo account (panel web D1 / admin local)
         self.bt_exit = QtWidgets.QPushButton("THOÁT")
-        self.bt_exit.setMinimumHeight(42)
+        self.bt_exit.setMinimumHeight(48)
         self.bt_exit.setStyleSheet(
             "QPushButton { background: #ffffff; color: #171717; border: 1px solid #c9c9c9; }"
             "QPushButton:hover { background: #f0f0f0; }"
         )
         layout.addWidget(self.bt_exit)
-        layout.addStretch()
+        layout.addSpacing(18)
+        layout.addStretch(1)
 
-        footer = QtWidgets.QLabel("© 2026 Preview Studio · local tool")
-        footer.setStyleSheet("color: #a3a3a3; font-size: 11px;")
+        footer = QtWidgets.QLabel("© 2026 Preview Studio · tài khoản do admin cấp")
+        footer.setStyleSheet("color: #a3a3a3; font-size: 11px; padding-top: 4px;")
         footer.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(footer)
 
         self.bt_login.clicked.connect(self._login)
-        self.bt_register.clicked.connect(self._register)
         self.bt_exit.clicked.connect(self.reject)
         self.ed_password.returnPressed.connect(self._login)
         self._center()
@@ -231,48 +241,44 @@ class LoginDialog(QtWidgets.QDialog):
         self.move((g.width() - self.width()) // 2, (g.height() - self.height()) // 2)
 
     def _show_error(self, message: str):
-        self.lbl_error.setText(f"❌ {message}")
+        self.lbl_error.setStyleSheet("color: #991b1b; font-size: 12px; padding: 4px 2px;")
+        self.lbl_error.setText(f"❌ {message}" if message else "")
         self.lbl_error.setVisible(True)
 
     def _login(self):
-        self.lbl_error.setVisible(False)
+        self.lbl_error.setText("")
         u = self.ed_username.text().strip()
         p = self.ed_password.text()
         if not u or not p:
-            self._show_error("Nhập username / password!")
+            self._show_error("Hãy nhập tên đăng nhập và mật khẩu!")
             return
         self.bt_login.setEnabled(False)
-        self.bt_login.setText("Đang đăng nhập...")
+        self.bt_login.setText("Đang đăng nhập…")
         QtWidgets.QApplication.processEvents()
         try:
             row = accounts.authenticate(u, p)
             if not row:
-                self._show_error("Sai tên đăng nhập hoặc mật khẩu!")
+                self._show_error(
+                    "Sai tên đăng nhập hoặc mật khẩu!\n"
+                    "(Tài khoản do admin cấp trên web — kiểm tra lại user/pass)"
+                )
                 return
             self.user = row
             _save_login_temp(u, p)
             self.accept()
         except Exception as exc:
-            self._show_error(str(exc)[:80])
+            msg = str(exc)
+            if (
+                "không kết nối" in msg
+                or "auth server" in msg
+                or "timed out" in msg.lower()
+            ):
+                self._show_error(f"Lỗi mạng: {msg[:100]}")
+            else:
+                self._show_error(msg[:120])
         finally:
             self.bt_login.setEnabled(True)
             self.bt_login.setText("ĐĂNG NHẬP")
-
-    def _register(self):
-        u = self.ed_username.text().strip()
-        p = self.ed_password.text()
-        if not u or not p:
-            self._show_error("Nhập username + password để tạo account!")
-            return
-        try:
-            accounts.create_account(u, p)
-            self._show_error("")  # clear
-            self.lbl_error.setStyleSheet("color: #166534; font-size: 12px;")
-            self.lbl_error.setText(f"✅ Đã tạo account '{u}' — bấm ĐĂNG NHẬP")
-            self.lbl_error.setVisible(True)
-        except Exception as exc:
-            self.lbl_error.setStyleSheet("color: #991b1b; font-size: 12px;")
-            self._show_error(str(exc)[:80])
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
@@ -292,11 +298,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1260, 820)
         self.setMinimumSize(1040, 680)
         self.user = user
-        # Admin account/proxy/gói ký tự → web https://tts-origin.liveyt.pro/admin/
-        # Tool desktop chỉ Generate TTS
+        # Tab: TTS generate + Edit MP3 (ffmpeg copy)
+        cfg = load_config()
+        out_dir = cfg.get("output_dir") or os.path.join(_APP_DIR, "output")
+        self._tabs = QtWidgets.QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.setStyleSheet(
+            """
+            QTabWidget::pane { border: 0; background: #f2f2f2; }
+            QTabBar::tab {
+                background: #e8e8e8; color: #525252; padding: 8px 16px;
+                margin-right: 2px; border-top-left-radius: 8px;
+                border-top-right-radius: 8px; font-weight: 600;
+            }
+            QTabBar::tab:selected { background: #ffffff; color: #171717; }
+            """
+        )
         self._gen = PreviewTab(self, user, load_config, save_config)
-        self.setCentralWidget(self._gen)
+        self._edit = EditMp3Tab(self, default_dir=out_dir)
+        self._tabs.addTab(self._gen, "TTS Preview")
+        self._tabs.addTab(self._edit, "Edit MP3")
+        self.setCentralWidget(self._tabs)
         self.setStyleSheet("QMainWindow { background: #f2f2f2; }")
+
+    def show_tts_tab(self):
+        self._tabs.setCurrentWidget(self._gen)
+
+    def show_edit_mp3_tab(self, paths: list | None = None):
+        if paths:
+            self._edit.open_with_files(paths)
+        # refresh default out from TTS config
+        try:
+            cfg = load_config()
+            d = cfg.get("output_dir") or ""
+            if d:
+                self._edit._default_dir = d
+        except Exception:
+            pass
+        self._tabs.setCurrentWidget(self._edit)
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:

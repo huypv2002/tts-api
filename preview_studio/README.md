@@ -1,4 +1,4 @@
-# HuyViet Preview Studio (desktop tool LOCAL)
+# Bubble TTS Elevenlabs Unlimited Preview Studio (desktop tool LOCAL)
 
 GUI clone OmniVoice — **generate TTS local** (`fast_tts`).
 

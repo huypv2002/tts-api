@@ -349,7 +349,6 @@ async function handleApi(req, env) {
                 (Number(row.char_quota) || 0) - (Number(row.chars_used) || 0)
               ),
         max_workers: Math.min(5, Math.max(1, Number(row.max_workers) || 1)),
-        max_chars: Number(row.max_chars) || 0,
         has_proxy: proxiesList.length > 0,
         proxies_sealed,
         proxies_count: proxiesList.length,
@@ -527,7 +526,7 @@ async function handleApi(req, env) {
   if (path === "/accounts" && method === "GET") {
     const r = await env.DB.prepare(
       `SELECT id, username, role, enabled, note, package_id, package_name,
-              char_quota, chars_used, max_workers, max_chars, proxy_id, proxy_host, proxy_port,
+              char_quota, chars_used, max_workers, proxy_id, proxy_host, proxy_port,
               proxy_username, proxy_label, api_key_prefix, created_at, last_login_at
        FROM accounts ORDER BY created_at DESC`
     ).all();
@@ -568,7 +567,6 @@ async function handleApi(req, env) {
             !!a.proxy_id ||
             !!a.proxy_api_key,
           max_workers: Math.min(5, Math.max(1, a.max_workers || 1)),
-          max_chars: Number(a.max_chars) || 0,
           proxy_provider: a.proxy_provider || "proxyxoay_net",
           proxies: proxies
         };
@@ -648,11 +646,10 @@ async function handleApi(req, env) {
     await env.DB.prepare(
       `INSERT INTO accounts (
         id, username, password_salt, password_hash, role, enabled, note,
-        package_id, package_name, char_quota, chars_used, max_workers, max_chars,
+        package_id, package_name, char_quota, chars_used, max_workers,
         proxy_id, proxy_provider, proxy_api_key, proxy_username, proxy_password,
         proxy_host, proxy_port, proxy_label, api_key_hash, api_key_prefix, created_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,
-        ?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`
     )
       .bind(
         id,
@@ -666,7 +663,6 @@ async function handleApi(req, env) {
         package_name,
         char_quota,
         max_workers,
-        Number(b.max_chars) || 0,
         proxy_id,
         proxy_provider,
         proxy_api_key,
@@ -688,7 +684,6 @@ async function handleApi(req, env) {
       note: "Save api_key now — not shown again",
       char_quota,
       max_workers,
-      max_chars: Number(b.max_chars) || 0,
       proxy_id,
       proxy_provider,
     });
@@ -730,8 +725,6 @@ async function handleApi(req, env) {
       5,
       Math.max(1, Number(b.max_workers != null ? b.max_workers : row.max_workers) || 2)
     );
-
-    const max_chars = b.max_chars != null ? Number(b.max_chars) : (Number(row.max_chars) || 0);
 
     let proxy_id = b.proxy_id != null ? b.proxy_id : row.proxy_id;
     let proxy_provider = b.proxy_provider || row.proxy_provider || "proxyxoay_net";
@@ -778,7 +771,7 @@ async function handleApi(req, env) {
       `UPDATE accounts SET
         role=?, enabled=?, note=?,
         package_id=?, package_name=?, char_quota=?,
-        max_workers=?, max_chars=?,
+        max_workers=?,
         proxy_id=?, proxy_provider=?, proxy_api_key=?,
         proxy_username=?,
         proxy_password=CASE WHEN ? = '' THEN proxy_password ELSE ? END,
@@ -795,7 +788,6 @@ async function handleApi(req, env) {
         package_name,
         char_quota,
         max_workers,
-        max_chars,
         proxy_id || "",
         proxy_provider,
         proxy_api_key || "",
@@ -812,7 +804,7 @@ async function handleApi(req, env) {
         id
       )
       .run();
-    return json({ ok: true, id, proxy_id, proxy_provider, max_chars });
+    return json({ ok: true, id, proxy_id, proxy_provider });
   }
 
   if (path.startsWith("/accounts/") && method === "DELETE") {

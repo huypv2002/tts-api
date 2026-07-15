@@ -1,4 +1,4 @@
-// CF D1 admin — build 6-seal
+// CF D1 admin — build 5
 // /admin on custom domain, or root on workers.dev
 const API_BASE = (() => {
   const p = location.pathname || "";
@@ -34,8 +34,7 @@ function esc(s) {
 }
 
 function fmtM(n) {
-  const v = Number(n);
-  if (v <= 0 || v === -1) return "∞ Unlimited";
+  const v = Number(n) || 0;
   if (v >= 1e6) return (v / 1e6).toFixed(v % 1e6 === 0 ? 0 : 1) + "M";
   if (v >= 1e3) return (v / 1e3).toFixed(v % 1e3 === 0 ? 0 : 1) + "K";
   return String(v);
@@ -243,11 +242,7 @@ async function renderOverview(root) {
               <td>${esc(a.username)}</td>
               <td>${badge(a.role || "user")}</td>
               <td>${esc(a.package_name || "—")}</td>
-              <td>${
-                Number(a.char_quota) <= 0 || a.unlimited
-                  ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
-                  : `${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}`
-              }</td>
+              <td>${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}</td>
               <td>${a.max_workers ?? "—"}</td>
               <td class="mono">${a.has_proxy ? esc(a.proxy_host || a.proxy_id || "yes") : "—"}</td>
             </tr>`
@@ -304,31 +299,20 @@ async function renderAccounts(root) {
     api("/proxies"),
   ]);
   const pkgOpts = (pkgs.packages || [])
-    .map((p) => {
-      const c = Number(p.chars);
-      const lab =
-        c <= 0 || c === -1
-          ? `${esc(p.name)} (∞ Unlimited)`
-          : `${esc(p.name)} (${fmtM(p.chars)})`;
-      return `<option value="${esc(p.id)}">${lab}</option>`;
-    })
+    .map((p) => `<option value="${esc(p.id)}">${esc(p.name)} (${fmtM(p.chars)})</option>`)
     .join("");
   const pxOpts = (pxs.proxies || [])
     .filter((p) => p.enabled)
-    .map((p) => {
-      const prov = p.provider || "proxyxoay_net";
-      const hint =
-        prov.includes("shop")
-          ? "shop key"
-          : `${p.host || "?"}:${p.port || "?"}`;
-      return `<option value="${esc(p.id)}">${esc(p.label || p.id)} · ${esc(prov)} · ${esc(hint)}</option>`;
-    })
+    .map(
+      (p) =>
+        `<option value="${esc(p.id)}">${esc(p.label || p.id)} (${esc(p.host)}:${esc(p.port)})</option>`
+    )
     .join("");
 
   root.innerHTML = `
     <div class="panel">
       <h3>Tạo account</h3>
-      <p class="muted">Gói ký tự · max luồng ≤ 5 · gắn proxy (proxyxoay.net hoặc proxyxoay.shop). Tool login nhận proxy <strong>mã hóa</strong>.</p>
+      <p class="muted">Quản lý trên Cloudflare D1 · gói ký tự · max luồng ≤ 5 · gắn proxyxoay</p>
       <div class="grid-2">
         <div class="field"><label>Username</label><input id="a-user" autocomplete="off" /></div>
         <div class="field"><label>Password</label><input id="a-pass" type="password" autocomplete="new-password" /></div>
@@ -341,10 +325,9 @@ async function renderAccounts(root) {
           <select id="a-pkg"><option value="">—</option>${pkgOpts}</select>
         </div>
         <div class="field"><label>Max luồng (1–5)</label><input id="a-mw" type="number" min="1" max="5" value="3" /></div>
-        <div class="field"><label>Max chars/chunk (0=mặc định)</label><input id="a-mc" type="number" min="0" max="5000" value="0" /></div>
         <div class="field">
-          <label>Gắn proxy (net / shop)</label>
-          <select id="a-px"><option value="">— không gắn —</option>${pxOpts}</select>
+          <label>Proxy pool</label>
+          <select id="a-px"><option value="">—</option>${pxOpts}</select>
         </div>
       </div>
       <div class="form-actions">
@@ -358,50 +341,30 @@ async function renderAccounts(root) {
         <thead>
           <tr>
             <th>User</th><th>Role</th><th>Gói</th><th>Used / Quota</th>
-            <th>Luồng</th><th>Max chars</th><th>Proxies gắn</th><th></th>
+            <th>Luồng</th><th>Proxy</th><th></th>
           </tr>
         </thead>
         <tbody>
           ${(acc.accounts || [])
-            .map((a) => {
-              const proxies = a.proxies || [];
-              const proxyListHtml = proxies.length > 0
-                ? proxies.map(p => `
-                  <div class="proxy-tag" style="display:flex;align-items:center;gap:4px;margin:2px 0">
-                    <span style="font-size:11px">${esc(p.priority)}. ${esc(p.label || p.proxy_id)} (${esc(p.provider.replace("proxyxoay_", ""))})</span>
-                    <button type="button" class="danger" style="padding:2px 6px;font-size:10px" data-act="remove-proxy" data-proxy-id="${esc(p.proxy_id)}">×</button>
-                  </div>
-                `).join("")
-                : `<span class="muted" style="font-size:11px">chưa gắn proxy</span>`;
-              
-              return `
+            .map(
+              (a) => `
             <tr data-id="${esc(a.id)}">
               <td>${esc(a.username)}</td>
               <td>${badge(a.role || "user")}</td>
               <td>${esc(a.package_name || "—")}</td>
-              <td>${
-                Number(a.char_quota) <= 0 || a.unlimited
-                  ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
-                  : `${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}`
-              }</td>
+              <td>${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}</td>
               <td>
                 <input type="number" min="1" max="5" value="${a.max_workers ?? 2}" data-f="max_workers" style="width:70px" />
               </td>
-              <td>
-                <input type="number" min="0" max="5000" value="${a.max_chars ?? 0}" data-f="max_chars" style="width:80px" title="0 = studio default 300" />
-              </td>
-              <td>
-                ${proxyListHtml}
-                <button type="button" style="margin-top:4px;font-size:11px;padding:4px 8px" data-act="add-proxy">+ Thêm proxy</button>
-              </td>
+              <td class="mono" style="font-size:11px">${a.has_proxy ? esc(a.proxy_host || a.proxy_id || "yes") : "—"}</td>
               <td class="row" style="margin:0;flex-wrap:wrap;gap:4px">
                 <button type="button" data-act="save">Save</button>
                 <button type="button" data-act="reset">Reset used</button>
                 <button type="button" class="danger" data-act="del">Xóa</button>
               </td>
-            </tr>`;
-            })
-            .join("") || `<tr><td colspan="8" class="muted">Chưa có account</td></tr>`}
+            </tr>`
+            )
+            .join("") || `<tr><td colspan="7" class="muted">Chưa có account</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -412,24 +375,19 @@ async function renderAccounts(root) {
       let mw = +($("#a-mw").value || 3);
       if (mw < 1) mw = 1;
       if (mw > 5) mw = 5;
-      let mc = +($("#a-mc").value || 0);
-      if (mc < 0) mc = 0;
-      if (mc > 5000) mc = 5000;
       const body = {
         username: $("#a-user").value.trim(),
         password: $("#a-pass").value,
         role: $("#a-role").value,
         package_id: $("#a-pkg").value,
         max_workers: mw,
-        max_chars: mc,
         proxy_id: $("#a-px").value,
       };
       const res = await api("/accounts", { method: "POST", body: JSON.stringify(body) });
       const box = $("#a-new");
       box.classList.remove("hidden");
       box.style.display = "block";
-      const mcLabel = Number(res.max_chars) > 0 ? res.max_chars : "mặc định";
-      box.innerHTML = `<p class="muted">Account <strong>${esc(res.username)}</strong> · gói ${fmtM(res.char_quota)} · max ${res.max_workers} luồng · chunk ${esc(String(mcLabel))}</p>
+      box.innerHTML = `<p class="muted">Account <strong>${esc(res.username)}</strong> · gói ${fmtM(res.char_quota)} · max ${res.max_workers} luồng</p>
         <pre class="keybox">${esc(res.api_key || "")}</pre>
         <p class="muted">Copy api_key ngay — chỉ hiện 1 lần</p>
         <button type="button" id="a-copy">Copy key</button>`;
@@ -454,15 +412,11 @@ async function renderAccounts(root) {
         try {
           let mw = +tr.querySelector('[data-f="max_workers"]').value || 2;
           mw = Math.min(5, Math.max(1, mw));
-          const mcEl = tr.querySelector('[data-f="max_chars"]');
-          let mc = mcEl ? +mcEl.value : 0;
-          if (!Number.isFinite(mc) || mc < 0) mc = 0;
-          if (mc > 5000) mc = 5000;
           await api(`/accounts/${id}`, {
             method: "PATCH",
-            body: JSON.stringify({ max_workers: mw, max_chars: mc }),
+            body: JSON.stringify({ max_workers: mw }),
           });
-          toast("Saved (luồng + max chars)");
+          toast("Saved");
           navigate("accounts");
         } catch (e) {
           toast(e.message);
@@ -494,76 +448,6 @@ async function renderAccounts(root) {
           toast(e.message);
         }
       };
-    
-    // Thêm proxy
-    const addProxyBtn = tr.querySelector('[data-act="add-proxy"]');
-    if (addProxyBtn)
-      addProxyBtn.onclick = async () => {
-        // Lấy danh sách proxies chưa gắn
-        const pxsData = await api("/proxies");
-        const allProxies = (pxsData.proxies || []).filter(p => p.enabled);
-        const attachedProxyIds = new Set(
-          Array.from(tr.querySelectorAll('[data-proxy-id]')).map(el => el.dataset.proxyId)
-        );
-        const availableProxies = allProxies.filter(p => !attachedProxyIds.has(p.id));
-        
-        if (availableProxies.length === 0) {
-          toast("Không có proxy khả dụng để gắn");
-          return;
-        }
-        
-        const options = availableProxies.map(p => 
-          `<option value="${esc(p.id)}">${esc(p.label || p.id)} (${esc((p.provider || "").replace("proxyxoay_", ""))})</option>`
-        ).join("");
-        
-        // Hiển thị dropdown trong modal đơn giản
-        const modal = document.createElement("div");
-        modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
-        modal.innerHTML = `
-          <div style="background:white;padding:20px;border-radius:8px;min-width:300px">
-            <h4 style="margin:0 0 12px 0">Chọn proxy để gắn</h4>
-            <select id="modal-proxy-select" style="width:100%;padding:8px;margin-bottom:12px">
-              ${options}
-            </select>
-            <div style="display:flex;gap:8px;justify-content:flex-end">
-              <button id="modal-cancel" style="padding:8px 16px">Hủy</button>
-              <button id="modal-confirm" class="primary" style="padding:8px 16px">Gắn</button>
-            </div>
-          </div>
-        `;
-        document.body.appendChild(modal);
-        
-        modal.querySelector("#modal-cancel").onclick = () => modal.remove();
-        modal.querySelector("#modal-confirm").onclick = async () => {
-          const selectedProxyId = modal.querySelector("#modal-proxy-select").value;
-          modal.remove();
-          try {
-            await api(`/accounts/${id}/proxies`, {
-              method: "POST",
-              body: JSON.stringify({ proxy_id: selectedProxyId }),
-            });
-            toast("Đã gắn proxy");
-            navigate("accounts");
-          } catch (e) {
-            toast(e.message);
-          }
-        };
-      };
-    
-    // Xóa proxy
-    tr.querySelectorAll('[data-act="remove-proxy"]').forEach(btn => {
-      btn.onclick = async () => {
-        const proxyId = btn.dataset.proxyId;
-        if (!confirm("Gỡ proxy này khỏi account?")) return;
-        try {
-          await api(`/accounts/${id}/proxies/${proxyId}`, { method: "DELETE" });
-          toast("Đã gỡ proxy");
-          navigate("accounts");
-        } catch (e) {
-          toast(e.message);
-        }
-      };
-    });
   });
 }
 
@@ -574,32 +458,15 @@ async function renderProxies(root) {
 
   root.innerHTML = `
     <div class="panel">
-      <h3>Thêm / sửa proxy</h3>
-      <p class="muted">proxyxoay.net (rotating host) hoặc proxyxoay.shop (get.php key). Gắn cho user ở tab Accounts.</p>
+      <h3>Thêm / sửa proxyxoay</h3>
       <div class="grid-2">
         <div class="field"><label>ID</label><input id="p-id" placeholder="auto nếu trống" /></div>
-        <div class="field"><label>Label</label><input id="p-label" placeholder="EU #1 / Shop FPT" /></div>
-        <div class="field">
-          <label>Provider</label>
-          <select id="p-prov">
-            <option value="proxyxoay_net">proxyxoay.net</option>
-            <option value="proxyxoay_shop">proxyxoay.shop</option>
-          </select>
-        </div>
-        <div class="field"><label>API key</label><input id="p-key" placeholder="key mua hàng / rotating key" /></div>
-        <div class="field" data-net-only><label>Username</label><input id="p-user" /></div>
-        <div class="field" data-net-only><label>Password</label><input id="p-pass" type="password" /></div>
-        <div class="field" data-net-only><label>Host</label><input id="p-host" placeholder="vipvn7.proxyxoay.net" value="vipvn7.proxyxoay.net" /></div>
-        <div class="field" data-net-only><label>Port</label><input id="p-port" type="number" value="8978" /></div>
-        <div class="field" data-shop-only style="display:none"><label>Nhà mạng</label>
-          <input id="p-nhamang" value="random" placeholder="random / viettel / fpt…" />
-        </div>
-        <div class="field" data-shop-only style="display:none"><label>Tỉnh thành</label>
-          <input id="p-tinh" value="0" placeholder="0 = random" />
-        </div>
-        <div class="field" data-shop-only style="display:none"><label>Whitelist IPv4</label>
-          <input id="p-wl" placeholder="tuỳ chọn" />
-        </div>
+        <div class="field"><label>Label</label><input id="p-label" placeholder="EU #1" /></div>
+        <div class="field"><label>API key (proxyxoay)</label><input id="p-key" /></div>
+        <div class="field"><label>Username</label><input id="p-user" /></div>
+        <div class="field"><label>Password</label><input id="p-pass" type="password" /></div>
+        <div class="field"><label>Host</label><input id="p-host" placeholder="vipvn7.proxyxoay.net" value="vipvn7.proxyxoay.net" /></div>
+        <div class="field"><label>Port</label><input id="p-port" type="number" value="8978" /></div>
       </div>
       <div class="form-actions">
         <button class="primary" type="button" id="p-save">Lưu proxy</button>
@@ -608,7 +475,7 @@ async function renderProxies(root) {
     <div class="panel">
       <h3>Pool (${ready}/${list.length} enabled)</h3>
       <table>
-        <thead><tr><th>ID</th><th>Label</th><th>Provider</th><th>Host / Key</th><th>On</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Label</th><th>Host</th><th>User</th><th>On</th><th></th></tr></thead>
         <tbody>
           ${list
             .map(
@@ -616,12 +483,8 @@ async function renderProxies(root) {
             <tr>
               <td class="mono">${esc(p.id)}</td>
               <td>${esc(p.label || "")}</td>
-              <td>${esc((p.provider || "net").replace("proxyxoay_", ""))}</td>
-              <td class="mono" style="font-size:11px">${
-                String(p.provider || "").includes("shop")
-                  ? esc(p.api_key || "key…")
-                  : esc((p.host || "") + ":" + (p.port || ""))
-              }</td>
+              <td class="mono">${esc(p.host)}:${esc(p.port)}</td>
+              <td>${esc(p.username || "")}</td>
               <td>${p.enabled ? badge("ready") : badge("dead")}</td>
               <td>
                 <button type="button" class="danger" data-del="${esc(p.id)}">Xóa</button>
@@ -634,38 +497,23 @@ async function renderProxies(root) {
     </div>
   `;
 
-  const syncProv = () => {
-    const shop = ($("#p-prov").value || "").includes("shop");
-    $$("[data-net-only]").forEach((el) => {
-      el.style.display = shop ? "none" : "";
-    });
-    $$("[data-shop-only]").forEach((el) => {
-      el.style.display = shop ? "" : "none";
-    });
-  };
-  $("#p-prov").onchange = syncProv;
-  syncProv();
-
   $("#p-save").onclick = async () => {
     try {
-      const provider = $("#p-prov").value || "proxyxoay_net";
-      const body = {
-        id: $("#p-id").value.trim() || undefined,
-        label: $("#p-label").value.trim(),
-        api_key: $("#p-key").value.trim(),
-        username: $("#p-user").value.trim(),
-        password: $("#p-pass").value,
-        host: $("#p-host").value.trim(),
-        port: +$("#p-port").value || 8978,
-        enabled: true,
-        provider,
-        shop_nhamang: $("#p-nhamang") ? $("#p-nhamang").value.trim() : "random",
-        shop_tinhthanh: $("#p-tinh") ? $("#p-tinh").value.trim() : 0,
-        shop_whitelist: $("#p-wl") ? $("#p-wl").value.trim() : "",
-        shop_method: "GET",
-      };
-      await api("/proxies", { method: "POST", body: JSON.stringify(body) });
-      toast("Proxy saved · " + provider);
+      await api("/proxies", {
+        method: "POST",
+        body: JSON.stringify({
+          id: $("#p-id").value.trim() || undefined,
+          label: $("#p-label").value.trim(),
+          api_key: $("#p-key").value.trim(),
+          username: $("#p-user").value.trim(),
+          password: $("#p-pass").value,
+          host: $("#p-host").value.trim(),
+          port: +$("#p-port").value || 8978,
+          enabled: true,
+          provider: "proxyxoay_net",
+        }),
+      });
+      toast("Proxy saved");
       navigate("proxies");
     } catch (e) {
       toast(e.message);
@@ -693,13 +541,10 @@ async function renderPackages(root) {
   root.innerHTML = `
     <div class="panel">
       <h3>Thêm gói ký tự</h3>
-      <p class="muted">Gói theo triệu ký tự — hoặc Unlimited (−1). Gán cho account khi tạo / sửa.</p>
+      <p class="muted">Gói theo triệu ký tự — gán cho account khi tạo / sửa</p>
       <div class="grid-2">
         <div class="field"><label>Tên</label><input id="g-name" placeholder="Gói 20 triệu" /></div>
-        <div class="field"><label>Số ký tự</label><input id="g-chars" type="number" value="20000000" step="1000000" min="-1" /></div>
-        <div class="field" style="grid-column:1/-1">
-          <label><input type="checkbox" id="g-unlim" /> Unlimited (không giới hạn ký tự)</label>
-        </div>
+        <div class="field"><label>Số ký tự</label><input id="g-chars" type="number" value="20000000" step="1000000" min="1000" /></div>
       </div>
       <div class="form-actions">
         <button class="primary" type="button" id="g-save">Thêm gói</button>
@@ -716,11 +561,7 @@ async function renderPackages(root) {
             <tr>
               <td class="mono">${esc(p.id)}</td>
               <td>${esc(p.name)}</td>
-              <td>${
-                Number(p.chars) <= 0 || Number(p.chars) === -1
-                  ? "<strong>∞ Unlimited</strong>"
-                  : `${fmtM(p.chars)} <span class="muted">(${Number(p.chars).toLocaleString()})</span>`
-              }</td>
+              <td>${fmtM(p.chars)} <span class="muted">(${Number(p.chars).toLocaleString()})</span></td>
               <td>
                 <button type="button" class="danger" data-del="${esc(p.id)}">Xóa</button>
               </td>
@@ -732,29 +573,16 @@ async function renderPackages(root) {
     </div>
   `;
 
-  const gUnlim = $("#g-unlim");
-  if (gUnlim)
-    gUnlim.onchange = () => {
-      const on = gUnlim.checked;
-      if ($("#g-chars")) {
-        $("#g-chars").disabled = on;
-        if (on) $("#g-chars").value = -1;
-      }
-      if (on && !$("#g-name").value.trim()) $("#g-name").value = "Unlimited";
-    };
-
   $("#g-save").onclick = async () => {
     try {
-      const unlimited = !!(gUnlim && gUnlim.checked);
       await api("/packages", {
         method: "POST",
         body: JSON.stringify({
-          name: $("#g-name").value.trim() || (unlimited ? "Unlimited" : "Gói"),
-          chars: unlimited ? -1 : +$("#g-chars").value || 1000000,
-          unlimited,
+          name: $("#g-name").value.trim(),
+          chars: +$("#g-chars").value || 1000000,
         }),
       });
-      toast(unlimited ? "Unlimited package saved" : "Package saved");
+      toast("Package saved");
       navigate("packages");
     } catch (e) {
       toast(e.message);
@@ -805,7 +633,3 @@ $$(".nav-btn[data-page]").forEach((b) => {
 
 // build-5
 // 1783940529
-
-window.__TTS_ADMIN_BUILD="5";
-
-

@@ -28,9 +28,10 @@ DEFAULT_MODEL = "eleven_v3"
 CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
 PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
 
-# Silent MP3 for 1s pause between chunks
+# Gap between chunks when merge (aligned with 11Labs0811 ~1.5s)
 _STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SILENT_1S_PATH = os.path.join(_STUDIO_DIR, "silent_1s.mp3")
+CHUNK_GAP_SECONDS = 1.5
 
 
 def split_chunks(text: str, max_chars: int) -> List[str]:
@@ -227,8 +228,11 @@ class BatchWorker(QThread):
             if not fdir or not mout:
                 return
             ok_m, msg = merge_doan_mp3s(
-                fdir, mout, expected_parts=total_p,
-                silent_between=SILENT_1S_PATH,
+                fdir,
+                mout,
+                expected_parts=total_p,
+                silent_between="",  # auto 1.5s silence (11Labs-style gap)
+                silence_seconds=CHUNK_GAP_SECONDS,
             )
             if ok_m:
                 self.log.emit(f"📦 {fname}: {msg}")
@@ -854,19 +858,29 @@ class PreviewTab(QtWidgets.QWidget):
         mw = min(5, max(1, int(pub.get("max_workers") or 5)))
         self._workers = mw
         self._hsw_workers = 5
+        # max_chars: CF account >0 wins, else config default (300)
+        acc_mc = int(self.user.get("max_chars") or pub.get("max_chars") or 0)
+        if acc_mc > 0:
+            self._max_chars = max(40, min(5000, acc_mc))
+        else:
+            try:
+                self._max_chars = int(self.load_config().get("max_chars") or 300)
+            except Exception:
+                self._max_chars = 300
+        mc = int(self._max_chars or 300)
         if unlimited:
             self.lbl_login_status.setText(
-                f"{u} · Unlimited · đã gen {used:,} ký tự · tối đa {mw} luồng"
+                f"{u} · Unlimited · đã gen {used:,} ký tự · {mw} luồng · chunk ≤{mc}"
             )
             self.lbl_account.setText(
-                f"{u} · gói Unlimited · tối đa {mw} luồng"
+                f"{u} · gói Unlimited · tối đa {mw} luồng · max {mc} ký tự/đoạn"
             )
         else:
             self.lbl_login_status.setText(
-                f"{u} · đã dùng {used:,}/{quota:,} ký tự · tối đa {mw} luồng"
+                f"{u} · {used:,}/{quota:,} ký tự · {mw} luồng · chunk ≤{mc}"
             )
             self.lbl_account.setText(
-                f"{u} · còn {left:,} ký tự trong gói · tối đa {mw} luồng"
+                f"{u} · còn {left:,} ký tự · tối đa {mw} luồng · max {mc} ký tự/đoạn"
             )
 
     def _open_settings(self):

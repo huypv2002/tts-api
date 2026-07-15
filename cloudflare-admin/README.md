@@ -33,9 +33,14 @@ wrangler secret put API_SECRET
 wrangler deploy
 ```
 
-Worker URL dạng: `https://tts-admin-web.<subdomain>.workers.dev`
+### URL production
 
-Gắn domain custom (optional) trong Cloudflare dashboard.
+| URL | Ghi chú |
+|-----|---------|
+| **https://tts-origin.liveyt.pro/admin/** | Admin D1 (Worker route `admin*`) |
+| https://tts-admin-web.kh431248.workers.dev | Fallback workers.dev |
+
+`/v1/*` trên cùng host vẫn đi tunnel → Windows `tts-api`. Chỉ path `/admin*` do Worker + D1.
 
 ## Tính năng UI
 

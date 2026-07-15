@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   chars_used INTEGER NOT NULL DEFAULT 0,
   -- max luồng 1–5
   max_workers INTEGER NOT NULL DEFAULT 2,
+  -- max chars per chunk (0 = use default)
+  max_chars INTEGER NOT NULL DEFAULT 0,
   -- proxy gắn account (inline hoặc proxy_id)
   proxy_id TEXT DEFAULT '',
   proxy_provider TEXT DEFAULT 'proxyxoay_net',

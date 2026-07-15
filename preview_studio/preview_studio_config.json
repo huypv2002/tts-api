@@ -1,0 +1,35 @@
+{
+  "output_dir": "/Users/phamvanhuy/Downloads/tts-preview/preview_studio/output",
+  "proxy_seal_key": "huytts2026",
+  "max_chars": 300,
+  "workers": 5,
+  "hsw_workers": 5,
+  "voice_id": "Jmio6r8OUeqiK3cZ3N0K",
+  "lang": "vi",
+  "speed": 1.0,
+  "stability": 0.5,
+  "similarity_boost": 0.75,
+  "voices": [
+    {
+      "name": "Default",
+      "voice_id": "NOpBlnGInO9m6vDvFkFC",
+      "lang": "en"
+    },
+    {
+      "name": "Đức - Clear, Calm Master of Ceremonies",
+      "voice_id": "XBDAUT8ybuJTTCoOLSUj",
+      "lang": "vi",
+      "description": "MC Anh Đức - Vietnamese MC from Hanoi. Perfect for podcasts, announcers, narration and TV. Northern accent.\n",
+      "gender": "male",
+      "accent": "northern"
+    },
+    {
+      "name": "Thu Thảo",
+      "voice_id": "Jmio6r8OUeqiK3cZ3N0K",
+      "lang": "vi",
+      "description": "Great for storytelling and podcasts.",
+      "gender": "female",
+      "accent": "standard"
+    }
+  ]
+}
