@@ -1,31 +1,60 @@
 # -*- coding: utf-8 -*-
-"""Paths for source run vs Nuitka frozen (onefile / standalone).
+"""Paths for source run vs Nuitka frozen (standalone / onefile).
 
-Portable layout (user chỉ cần giải nén folder + double-click EXE):
+Portable layout (user giải nén folder + double-click EXE):
 
   TTS-Studio-Nuitka/
-    TTS Studio.exe
-    bin/ffmpeg.exe          (optional, preferred)
+    TTS Studio.exe          (+ DLL/Qt nếu standalone)
+    bin/ffmpeg.exe
     bin/ffprobe.exe
-    camoufox-browser/       (Camoufox Firefox binary — bắt buộc cho TTS)
+    camoufox-browser/       (Camoufox Firefox)
     silent_*.mp3
+    studio_boot.log         (tự tạo khi chạy)
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
 
 def is_frozen() -> bool:
-    # Nuitka sets sys.frozen; also detect __compiled__ on this module
     if getattr(sys, "frozen", False):
         return True
+    # Nuitka marks compiled modules
     try:
         return bool(__compiled__)  # type: ignore[name-defined]
     except NameError:
-        return False
+        pass
+    # Heuristic: running from .exe on Windows
+    try:
+        exe = os.path.abspath(sys.executable or "")
+        if exe.lower().endswith(".exe") and "python" not in os.path.basename(exe).lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def exe_file() -> str:
+    """Absolute path to the running executable (or script)."""
+    candidates = []
+    try:
+        if sys.argv and sys.argv[0]:
+            candidates.append(os.path.abspath(sys.argv[0]))
+    except Exception:
+        pass
+    try:
+        if sys.executable:
+            candidates.append(os.path.abspath(sys.executable))
+    except Exception:
+        pass
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return os.path.abspath(candidates[0] if candidates else ".")
 
 
 def app_dir() -> str:
@@ -33,11 +62,10 @@ def app_dir() -> str:
     Writable directory next to the executable (or preview_studio/ when source).
     Config, accounts.json, output/, crash log live here.
 
-    macOS .app: use folder containing PreviewStudio.app (not Contents/MacOS).
+    macOS .app: use folder containing *.app (not Contents/MacOS).
     """
     if is_frozen():
-        exe = os.path.abspath(sys.executable)
-        # .../Something.app/Contents/MacOS/binary → parent of .app
+        exe = exe_file()
         norm = exe.replace("\\", "/")
         if ".app/Contents/MacOS" in norm:
             cur = exe
@@ -53,12 +81,8 @@ def app_dir() -> str:
 
 
 def resource_dir() -> str:
-    """
-    Bundled read-only assets (silent_*.mp3, etc.).
-    Nuitka onefile extracts beside __file__ of this module.
-    """
+    """Bundled read-only assets (silent_*.mp3, Qt data files)."""
     if is_frozen():
-        # Prefer directory of this compiled module (contains include-data-files)
         here = os.path.dirname(os.path.abspath(__file__))
         if here and os.path.isdir(here):
             return here
@@ -67,16 +91,27 @@ def resource_dir() -> str:
 
 
 def portable_bin_dir() -> str:
-    """bin/ cạnh exe — chứa ffmpeg.exe / ffprobe.exe."""
     return os.path.join(app_dir(), "bin")
 
 
 def portable_camoufox_dir() -> str:
-    """
-    Thư mục browser Camoufox portable cạnh exe.
-    CI copy toàn bộ camoufox INSTALL_DIR vào đây.
-    """
     return os.path.join(app_dir(), "camoufox-browser")
+
+
+def boot_log_path() -> str:
+    return os.path.join(app_dir(), "studio_boot.log")
+
+
+def write_boot_log(msg: str) -> str:
+    """Append line to studio_boot.log next to EXE. Returns log path."""
+    path = boot_log_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+    return path
 
 
 def _looks_like_camoufox_install(path: str) -> bool:
@@ -88,7 +123,6 @@ def _looks_like_camoufox_install(path: str) -> bool:
         return False
     if not names:
         return False
-    # version.json + binary / .app
     markers = (
         "version.json",
         "camoufox.exe",
@@ -98,12 +132,10 @@ def _looks_like_camoufox_install(path: str) -> bool:
     )
     if any(m in names for m in markers):
         return True
-    # nested mac layout
     return any(os.path.isdir(os.path.join(path, n)) for n in names)
 
 
 def find_portable_ffmpeg() -> Optional[str]:
-    """ffmpeg cạnh exe: bin/ffmpeg.exe | ffmpeg.exe | PATH."""
     import shutil
 
     base = app_dir()
@@ -139,56 +171,51 @@ def find_portable_ffprobe() -> Optional[str]:
 
 def setup_portable_runtime() -> dict:
     """
-    Gọi càng sớm càng tốt (trước khi start HSW / Camoufox).
-
-    - Trỏ camoufox.pkgman.INSTALL_DIR → camoufox-browser/ cạnh exe
-    - Thêm bin/ vào PATH để ffmpeg được tìm thấy
+    Gọi sớm: PATH bin/ + patch camoufox INSTALL_DIR → camoufox-browser/.
     """
     info: dict = {
         "app_dir": app_dir(),
+        "exe": exe_file(),
+        "frozen": is_frozen(),
         "camoufox_dir": portable_camoufox_dir(),
         "camoufox_ok": False,
         "ffmpeg": find_portable_ffmpeg() or "",
         "patched": False,
     }
-    # PATH: bin cạnh exe
+    write_boot_log(
+        f"setup_portable frozen={info['frozen']} app_dir={info['app_dir']} exe={info['exe']}"
+    )
+
     bind = portable_bin_dir()
     if os.path.isdir(bind):
         os.environ["PATH"] = bind + os.pathsep + os.environ.get("PATH", "")
+        write_boot_log(f"PATH prepend bin={bind}")
 
     fox = portable_camoufox_dir()
     info["camoufox_ok"] = _looks_like_camoufox_install(fox)
+    write_boot_log(f"camoufox_ok={info['camoufox_ok']} dir={fox}")
 
-    # Patch camoufox INSTALL_DIR nếu package đã import được
     try:
         import camoufox.pkgman as pkgman
 
-        if info["camoufox_ok"]:
-            pkgman.INSTALL_DIR = Path(fox)
-            info["patched"] = True
-            # một số bản cache path qua env
-            os.environ["CAMOUFOX_INSTALL_DIR"] = fox
-        else:
-            # Chưa có browser bundled: cài vào folder portable (không rơi vào cache user)
-            try:
-                Path(fox).mkdir(parents=True, exist_ok=True)
-            except OSError:
-                pass
-            # Vẫn trỏ INSTALL_DIR về portable để fetch ghi đúng chỗ
-            pkgman.INSTALL_DIR = Path(fox)
-            info["patched"] = True
-            os.environ["CAMOUFOX_INSTALL_DIR"] = fox
+        try:
+            Path(fox).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        pkgman.INSTALL_DIR = Path(fox)
+        os.environ["CAMOUFOX_INSTALL_DIR"] = fox
+        info["patched"] = True
+        write_boot_log(f"camoufox INSTALL_DIR patched → {fox}")
     except Exception as e:
         info["camoufox_error"] = str(e)[:200]
+        write_boot_log(f"camoufox patch fail: {e}")
 
+    info["ffmpeg"] = find_portable_ffmpeg() or ""
+    write_boot_log(f"ffmpeg={info['ffmpeg'] or 'NOT FOUND'}")
     return info
 
 
 def ensure_camoufox_browser(download_if_missing: bool = True) -> str:
-    """
-    Đảm bảo có Camoufox binary. Trả về path thư mục install.
-    Portable: dùng camoufox-browser/ cạnh exe; thiếu thì fetch vào đó.
-    """
     setup_portable_runtime()
     fox = portable_camoufox_dir()
     if _looks_like_camoufox_install(fox):
@@ -203,7 +230,7 @@ def ensure_camoufox_browser(download_if_missing: bool = True) -> str:
     if not download_if_missing:
         raise FileNotFoundError(
             f"Thiếu Camoufox browser tại {fox}. "
-            "Hãy dùng bản full portable hoặc chạy: camoufox fetch"
+            "Dùng bản portable full (có folder camoufox-browser)."
         )
 
     try:
@@ -211,10 +238,9 @@ def ensure_camoufox_browser(download_if_missing: bool = True) -> str:
 
         pkgman.INSTALL_DIR = Path(fox)
         Path(fox).mkdir(parents=True, exist_ok=True)
-        # Cài vào INSTALL_DIR đã patch
+        write_boot_log("camoufox fetch/install start…")
         pkgman.CamoufoxFetcher().install()
         if not _looks_like_camoufox_install(fox):
-            # fallback: copy từ cache mặc định nếu fetcher ghi chỗ khác
             default = Path(pkgman.user_cache_dir("camoufox"))
             if default.is_dir() and default != Path(fox):
                 import shutil
@@ -223,19 +249,40 @@ def ensure_camoufox_browser(download_if_missing: bool = True) -> str:
                     shutil.rmtree(fox, ignore_errors=True)
                 shutil.copytree(str(default), fox)
         pkgman.INSTALL_DIR = Path(fox)
+        write_boot_log("camoufox install done")
         return fox
     except Exception as e:
+        write_boot_log(f"camoufox install fail: {e}")
         raise RuntimeError(
-            f"Không cài được Camoufox browser: {e}\n"
-            f"Thư mục mong đợi: {fox}"
+            f"Không cài được Camoufox browser: {e}\nThư mục: {fox}"
         ) from e
 
 
 def ensure_sys_path() -> None:
-    """Make studio + repo root importable (fast_tts)."""
     studio = app_dir() if is_frozen() else os.path.dirname(os.path.abspath(__file__))
-    # When frozen, fast_tts is compiled into the binary; still put dirs on path.
     root = studio if is_frozen() else os.path.dirname(studio)
     for p in (studio, root):
         if p and p not in sys.path:
             sys.path.insert(0, p)
+
+
+def show_fatal_dialog(title: str, message: str) -> None:
+    """Best-effort error UI (Qt or Win32 MessageBox)."""
+    write_boot_log(f"FATAL {title}: {message[:500]}")
+    try:
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication(sys.argv)
+        QtWidgets.QMessageBox.critical(None, title, message[:2000])
+        return
+    except Exception:
+        pass
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, message[:1500], title, 0x10)
+    except Exception:
+        pass

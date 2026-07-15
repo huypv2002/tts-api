@@ -117,19 +117,23 @@ jobs:
           if (-not $cpu) { $cpu = "4" }
           echo "CPU_COUNT=$cpu" >> $env:GITHUB_OUTPUT
 
-      - name: Build with Nuitka onefile (--mode=app)
+      # Standalone (folder) ổn định hơn onefile: Qt plugins cạnh EXE, mở nhanh, không extract TEMP
+      - name: Build with Nuitka standalone
         shell: pwsh
         run: |
           $cpu = "${{ steps.pkg.outputs.CPU_COUNT }}"
           $env:PYTHONPATH = (Resolve-Path ".").Path
           New-Item -ItemType Directory -Force -Path preview_studio\dist-nuitka | Out-Null
           python -m nuitka `
-            --mode=app `
+            --standalone `
             --assume-yes-for-downloads `
             --enable-plugin=pyside6 `
             --windows-console-mode=disable `
+            --force-stderr-spec="{PROGRAM_DIR}/studio_stderr.txt" `
+            --force-stdout-spec="{PROGRAM_DIR}/studio_stdout.txt" `
+            --include-qt-plugins=sensible,styles,platforms,iconengines,imageformats,tls,generic `
             --output-dir=preview_studio\dist-nuitka `
-            --output-filename="TTS Studio.exe" `
+            --output-filename="TTSStudio.exe" `
             --include-module=fast_tts `
             --include-module=app_paths `
             --include-module=accounts_store `
@@ -164,24 +168,40 @@ jobs:
         shell: pwsh
         run: |
           $dist = "preview_studio\dist-nuitka"
-          $exe = Join-Path $dist "TTS Studio.exe"
-          if (-not (Test-Path $exe)) {
-            Write-Host "EXE missing, search..."
+          # Nuitka standalone → PreviewStudio.dist\ (or TTSStudio.dist)
+          $distDir = Get-ChildItem -Path $dist -Directory -Filter "*.dist" | Select-Object -First 1
+          if (-not $distDir) {
+            Write-Host "No *.dist folder, listing:"
             Get-ChildItem -Recurse $dist -Filter "*.exe" | ForEach-Object { $_.FullName }
-            exit 1
+            throw "Nuitka standalone dist folder missing"
           }
+          Write-Host "Nuitka dist: $($distDir.FullName)"
+          $exe = Get-ChildItem -Path $distDir.FullName -Filter "*.exe" | Select-Object -First 1
+          if (-not $exe) { throw "no exe in dist" }
+          Write-Host "Main exe: $($exe.FullName) size=$([math]::Round($exe.Length/1MB,1)) MB"
+
           $release = Join-Path $dist "TTS-Studio-Nuitka"
           if (Test-Path $release) { Remove-Item $release -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $release | Out-Null
+
+          # Copy entire standalone tree (EXE + Qt/python DLLs)
+          Copy-Item -Path (Join-Path $distDir.FullName "*") -Destination $release -Recurse -Force
+
+          # Rename main exe to friendly name if needed
+          $mainExe = Join-Path $release $exe.Name
+          $friendly = Join-Path $release "TTS Studio.exe"
+          if ((Test-Path $mainExe) -and ($exe.Name -ne "TTS Studio.exe")) {
+            if (Test-Path $friendly) { Remove-Item $friendly -Force }
+            Rename-Item $mainExe "TTS Studio.exe"
+          }
+
           New-Item -ItemType Directory -Force -Path "$release\bin" | Out-Null
           New-Item -ItemType Directory -Force -Path "$release\camoufox-browser" | Out-Null
 
-          Copy-Item $exe $release
           Copy-Item preview_studio\silent_1s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item preview_studio\silent_1_5s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item preview_studio\silent_05s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item proxyxoay.example.json $release -ErrorAction SilentlyContinue
-          Copy-Item preview_studio\requirements.txt $release -ErrorAction SilentlyContinue
 
           # ffmpeg portable
           $ffSrc = "preview_studio\portable-runtime\bin"
@@ -192,7 +212,7 @@ jobs:
             throw "missing portable ffmpeg at $ffSrc"
           }
 
-          # camoufox browser → camoufox-browser/
+          # camoufox browser
           $fox = python -c "from camoufox.pkgman import INSTALL_DIR; print(INSTALL_DIR)"
           $fox = $fox.Trim()
           if (-not (Test-Path $fox)) { throw "camoufox INSTALL_DIR missing: $fox" }
@@ -202,33 +222,38 @@ jobs:
           if ($n -lt 5) { throw "camoufox-browser too small ($n files)" }
           Write-Host "camoufox-browser files=$n"
 
+          # Launcher: cd to folder then run (fix working directory)
           @"
           @echo off
           cd /d "%~dp0"
-          start "" "TTS Studio.exe"
-          "@ | Set-Content -Encoding ascii (Join-Path $release "run-tts-studio.bat")
+          if exist "TTS Studio.exe" (
+            start "" "TTS Studio.exe"
+          ) else if exist "TTSStudio.exe" (
+            start "" "TTSStudio.exe"
+          ) else if exist "PreviewStudio.exe" (
+            start "" "PreviewStudio.exe"
+          ) else (
+            echo EXE not found in %~dp0
+            dir /b *.exe
+            pause
+          )
+          "@ | Set-Content -Encoding ascii (Join-Path $release "CHAY-STUDIO.bat")
+
           @"
           TTS Studio — Portable (Windows)
           ================================
-          Giải nén CẢ THƯ MỤC (không chỉ lấy mỗi file .exe).
+          1) Giải nén CẢ THƯ MỤC (không chỉ copy 1 file .exe)
+          2) Double-click  CHAY-STUDIO.bat  hoặc  TTS Studio.exe
+          3) Nếu không hiện cửa sổ: mở studio_boot.log / studio_stderr.txt cạnh EXE
 
-          Cấu trúc:
-            TTS Studio.exe
-            bin\ffmpeg.exe
-            camoufox-browser\   (trình duyệt Camoufox)
-            silent_*.mp3
-
-          Cách dùng:
-            1) Giải nén zip
-            2) Double-click "TTS Studio.exe" (hoặc run-tts-studio.bat)
-            3) Đăng nhập account admin cấp
-
-          Không cần cài Python / ffmpeg / camoufox riêng.
+          Có sẵn:
+            - Qt/DLL (standalone)
+            - bin\ffmpeg.exe
+            - camoufox-browser\
           "@ | Set-Content -Encoding utf8 (Join-Path $release "HUONG_DAN.txt")
 
           $zip = "preview_studio\TTS-Studio-Nuitka-windows.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
-          # Compress-Archive can choke on huge trees; use .NET zip
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [System.IO.Compression.ZipFile]::CreateFromDirectory(
             (Resolve-Path $release).Path,
@@ -237,7 +262,7 @@ jobs:
             $true
           )
           $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
-          Write-Host "ZIP: $zip ($sizeMB MB) — portable full"
+          Write-Host "ZIP: $zip ($sizeMB MB) — standalone portable"
 
       # Artifacts often hit free-tier storage quota; keep as best-effort only.
       - name: Upload artifact (best-effort)

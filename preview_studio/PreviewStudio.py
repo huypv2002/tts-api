@@ -365,32 +365,65 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main() -> int:
+    from app_paths import (
+        app_dir,
+        boot_log_path,
+        setup_portable_runtime,
+        show_fatal_dialog,
+        write_boot_log,
+    )
+
+    write_boot_log("main() enter")
     try:
         # Portable: PATH bin/ + Camoufox cạnh EXE trước khi login/TTS
-        try:
-            from app_paths import setup_portable_runtime
+        info = setup_portable_runtime()
+        write_boot_log(f"portable ok={info}")
 
-            setup_portable_runtime()
-        except Exception:
-            pass
         app = QtWidgets.QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
+        write_boot_log("QApplication created")
+
         login = LoginDialog()
-        if login.exec() != QtWidgets.QDialog.Accepted or not login.user:
+        # Modal dialog — exec() hiện cửa sổ login
+        write_boot_log("LoginDialog exec…")
+        result = login.exec()
+        if result != QtWidgets.QDialog.Accepted or not login.user:
+            write_boot_log(f"login cancelled result={result}")
             return 0
+        write_boot_log(f"login ok user={login.user.get('username')}")
         window = MainWindow(login.user)
         window.show()
+        window.raise_()
+        window.activateWindow()
+        write_boot_log("MainWindow shown")
         return app.exec()
-    except Exception:
-        crash = os.path.join(_APP_DIR, "preview_studio_crash.log")
-        with open(crash, "w", encoding="utf-8") as f:
-            f.write(traceback.format_exc())
+    except Exception as e:
+        tb = traceback.format_exc()
+        crash = os.path.join(app_dir(), "preview_studio_crash.log")
         try:
-            QtWidgets.QMessageBox.critical(None, "Lỗi", f"Crash log:\n{crash}")
+            with open(crash, "w", encoding="utf-8") as f:
+                f.write(tb)
         except Exception:
-            pass
-        raise
+            crash = boot_log_path()
+        write_boot_log(tb)
+        show_fatal_dialog(
+            "TTS Studio — lỗi khởi động",
+            f"{e}\n\nChi tiết:\n{crash}\n{boot_log_path()}",
+        )
+        return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException as e:
+        try:
+            from app_paths import show_fatal_dialog, write_boot_log
+
+            write_boot_log(f"unhandled: {e}\n{traceback.format_exc()}")
+            show_fatal_dialog("TTS Studio — lỗi", f"{e}\n\nXem studio_boot.log cạnh EXE")
+        except Exception:
+            pass
+        raise
