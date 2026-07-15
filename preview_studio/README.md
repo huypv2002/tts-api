@@ -1,6 +1,6 @@
-# Bubble TTS Elevenlabs Unlimited Preview Studio (desktop tool LOCAL)
+# ElevenLabs Unlimited Studio (desktop tool LOCAL)
 
-GUI clone OmniVoice — **generate TTS local** (`fast_tts`).
+GUI desktop — **generate TTS local** (`fast_tts`).
 
 ## Phân tách (BẮT BUỘC)
 

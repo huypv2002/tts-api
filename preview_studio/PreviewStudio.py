@@ -24,9 +24,10 @@ _APP_DIR = app_dir()
 
 import accounts_store as accounts  # noqa: E402
 from ui.edit_mp3_tab import EditMp3Tab  # noqa: E402
+from ui.multivoice_tab import MultivoiceTab  # noqa: E402
 from ui.preview_tab import PreviewTab  # noqa: E402
 
-APP_NAME = "Bubble TTS Elevenlabs Unlimited Preview Studio"
+APP_NAME = "ElevenLabs Unlimited Studio"
 LOGIN_TEMP_FILE = os.path.join(_APP_DIR, "login_temp.json")
 CONFIG_FILE = os.path.join(_APP_DIR, "preview_studio_config.json")
 
@@ -108,7 +109,7 @@ class LoginDialog(QtWidgets.QDialog):
         accounts.ensure_default_account()
         saved = _load_login_temp()
         self.user = None
-        self.setWindowTitle("Bubble TTS Elevenlabs Unlimited Preview Studio - Đăng nhập")
+        self.setWindowTitle("ElevenLabs Unlimited Studio — Đăng nhập")
         self.setModal(True)
         # Taller card — fixed size was too short / cramped on HiDPI
         self.setFixedSize(480, 640)
@@ -153,7 +154,7 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addLayout(close_layout)
         layout.addSpacing(8)
 
-        icon_label = QtWidgets.QLabel("PREVIEW")
+        icon_label = QtWidgets.QLabel("STUDIO")
         icon_label.setStyleSheet(
             "font-size: 12px; font-weight: 700; letter-spacing: 1px; color: #ffffff; background: #171717;"
             "border-radius: 16px; padding: 10px 16px;"
@@ -168,7 +169,7 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addLayout(icon_row)
         layout.addSpacing(18)
 
-        title = QtWidgets.QLabel("Bubble TTS Elevenlabs Unlimited PREVIEW STUDIO")
+        title = QtWidgets.QLabel("ElevenLabs Unlimited STUDIO")
         title.setStyleSheet(
             "font-size: 20px; font-weight: 700; color: #171717; background: transparent;"
         )
@@ -232,7 +233,7 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addSpacing(18)
         layout.addStretch(1)
 
-        footer = QtWidgets.QLabel("© 2026 Preview Studio · tài khoản do admin cấp")
+        footer = QtWidgets.QLabel("© 2026 ElevenLabs Unlimited Studio · tài khoản do admin cấp")
         footer.setStyleSheet("color: #a3a3a3; font-size: 11px; padding-top: 4px;")
         footer.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(footer)
@@ -324,14 +325,19 @@ class MainWindow(QtWidgets.QMainWindow):
             """
         )
         self._gen = PreviewTab(self, user, load_config, save_config)
+        self._multi = MultivoiceTab(self, user, load_config, save_config)
         self._edit = EditMp3Tab(self, default_dir=out_dir)
-        self._tabs.addTab(self._gen, "TTS Preview")
+        self._tabs.addTab(self._gen, "Tạo audio")
+        self._tabs.addTab(self._multi, "Hội thoại")
         self._tabs.addTab(self._edit, "Edit MP3")
         self.setCentralWidget(self._tabs)
         self.setStyleSheet("QMainWindow { background: #f2f2f2; }")
 
     def show_tts_tab(self):
         self._tabs.setCurrentWidget(self._gen)
+
+    def show_multivoice_tab(self):
+        self._tabs.setCurrentWidget(self._multi)
 
     def show_edit_mp3_tab(self, paths: list | None = None):
         if paths:
@@ -349,6 +355,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:
             self._gen.cleanup()
+        except Exception:
+            pass
+        try:
+            self._multi.cleanup()
         except Exception:
             pass
         event.accept()

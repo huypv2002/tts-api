@@ -852,6 +852,8 @@ class TokenPool:
         self._tasks: list[asyncio.Task] = []
         self._lock = asyncio.Lock()
         self._inflight = 0  # số mint đang chạy (đặt chỗ)
+        # Pause mint khi lane đang đổi IP / cooldown (tránh đốt token trên IP chết)
+        self._paused = False
         self.stats = {
             "produced": 0,
             "consumed": 0,
@@ -920,11 +922,33 @@ class TokenPool:
             self.stats["invalidated"] += n
         return n
 
+    async def set_paused(self, paused: bool, reason: str = "") -> None:
+        """
+        Pause: dừng mint + vứt token sẵn (IP đang bad / đang rotate).
+        Resume: caller phải gọi on_proxy_changed(new_url) hoặc set_paused(False)
+        sau khi IP ổn.
+        """
+        async with self._lock:
+            self._paused = bool(paused)
+            dropped = 0
+            if self._paused:
+                self.gen += 1  # invalidate inflight mints
+                dropped = await self._drain()
+        if self._paused:
+            log(
+                f"  [token-pool] PAUSE gen={self.gen} dropped={dropped} "
+                f"reason={reason or 'pause'}"
+            )
+        else:
+            log(f"  [token-pool] RESUME reason={reason or 'resume'}")
+            self._kick()
+
     async def on_proxy_changed(self, proxy: str | None, reason: str = "") -> None:
         """Rotate IP → vứt token cũ; kick mint lại trên IP mới."""
         async with self._lock:
             self.proxy = proxy
             self.gen += 1
+            self._paused = False  # IP mới → cho mint lại
             dropped = await self._drain()
             # inflight mints sẽ discard vì gen lệch
         log(
@@ -953,6 +977,10 @@ class TokenPool:
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self._paused:
+                # Lane đang đổi IP — không take / không starve mint
+                await asyncio.sleep(0.35)
+                continue
             try:
                 rec = self._q.get_nowait()
             except asyncio.QueueEmpty:
@@ -967,7 +995,7 @@ class TokenPool:
                 except asyncio.TimeoutError:
                     continue
 
-            if not self._usable(rec):
+            if self._paused or not self._usable(rec):
                 self.stats["stale"] += 1
                 self._kick()
                 continue
@@ -981,15 +1009,20 @@ class TokenPool:
             )
             return rec.token, rec.proxy
 
+        if self._paused:
+            raise RuntimeError("token-pool đang pause (đổi IP) — thử lại")
+
         # Starve: solve on-demand trên ĐÚNG self.proxy hiện tại
         log("  [token-pool] starve → on-demand 1 token trên proxy pool")
         self._kick()
         async with self._lock:
+            if self._paused:
+                raise RuntimeError("token-pool đang pause (đổi IP) — thử lại")
             px = self.proxy
             gen = self.gen
         token = await solve_token(px)
         # Nếu vừa rotate trong lúc solve → token có thể stale; caller retry
-        if gen != self.gen or px != self.proxy:
+        if gen != self.gen or px != self.proxy or self._paused:
             raise RuntimeError(
                 "token solved nhưng proxy đã rotate — thử lại (token⇄proxy)"
             )
@@ -1070,6 +1103,9 @@ class TokenPool:
         """
         while not self._stop.is_set():
             try:
+                if self._paused:
+                    await asyncio.sleep(0.4)
+                    continue
                 if not self._need_more():
                     await self._wait_slot()
                     continue
@@ -1080,6 +1116,8 @@ class TokenPool:
                     continue
 
                 try:
+                    if self._paused:
+                        continue
                     rec = await self._mint_one(rid)
                 finally:
                     await self._release_reserve()
@@ -1087,6 +1125,9 @@ class TokenPool:
                 if rec is None:
                     self._kick()
                     await asyncio.sleep(0.12)
+                    continue
+
+                if self._paused or not self._usable(rec):
                     continue
 
                 await self._q.put(rec)
@@ -1200,12 +1241,15 @@ def proxyxoay_net_from_status(key: str) -> str:
 
 
 def proxyxoay_net_change_ip(key: str) -> None:
-    """Rotate exit IP (package may limit interval, e.g. 4 minutes)."""
+    """Rotate exit IP (package may limit interval, e.g. 1–4 minutes)."""
     r = httpx.get(PROXYXOAY_NET_CHANGE_IP.format(key=key), timeout=30.0)
     data = r.json()
     log(f"  [proxyxoay.net] change-ip → {data.get('message') or data}")
     if data.get("status") != 200:
-        raise RuntimeError(f"change-ip fail: {data}")
+        wait_s = parse_proxy_cooldown(data, default=60.0)
+        raise RuntimeError(
+            f"change-ip fail: {data.get('message') or data} | wait_s={wait_s:.1f}"
+        )
     time.sleep(3)  # docs: đợi vài giây
 
 
@@ -1236,6 +1280,127 @@ def parse_proxyhttp(raw: str) -> str:
     return f"http://{host}:{port}"
 
 
+def parse_proxy_cooldown(
+    source: object,
+    *,
+    default: float = 60.0,
+    min_s: float = 3.0,
+    max_s: float = 600.0,
+) -> float:
+    """
+    Số giây CÒN LẠI trước lần xoay proxy kế tiếp.
+
+    Gói xoay 1 phút/lần: API thường trả thời gian còn lại (giây hoặc ms).
+    Ví dụ:
+      message: "Con 35s moi co the doi proxy"
+      field: time=35000 (ms) / thoigian=35 / wait=35
+      net: "Please wait 60 seconds"
+    """
+    default = float(default if default is not None else 60.0)
+
+    def _from_number(n: float, force_ms: bool = False) -> float | None:
+        if n != n or n < 0:  # NaN
+            return None
+        # Rõ là ms
+        if force_ms or n >= 1000:
+            return max(min_s, min(max_s, n / 1000.0 + 1.5))
+        # 0–600: coi là giây (còn lại trong chu kỳ 1–10 phút)
+        if n <= max_s:
+            return max(min_s, min(max_s, n + 1.5))
+        return None
+
+    def _from_text(msg: str) -> float | None:
+        if not msg:
+            return None
+        # ms trước (35000ms, 35000 ms)
+        m = re.search(r"(\d+(?:\.\d+)?)\s*ms\b", msg, re.I)
+        if m:
+            return _from_number(float(m.group(1)), force_ms=True)
+        # phút
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(phút|minute|min)\b", msg, re.I)
+        if m:
+            return max(min_s, min(max_s, float(m.group(1)) * 60 + 2))
+        # giây / s  — "Con 35s", "Còn 35 giây", "wait 60 seconds"
+        m = re.search(
+            r"(?:c[oò]n\s*)?(\d+(?:\.\d+)?)\s*(?:giây|seconds?|secs?|s)\b",
+            msg,
+            re.I,
+        )
+        if m:
+            return _from_number(float(m.group(1)), force_ms=False)
+        # "Con 35 moi…" không unit
+        m = re.search(r"c[oò]n\s+(\d+(?:\.\d+)?)\b", msg, re.I)
+        if m:
+            return _from_number(float(m.group(1)), force_ms=False)
+        # wait=35000 / remain: 35000
+        m = re.search(
+            r"(?:wait|remain(?:ing)?|cooldown|ttl|left)\s*[=:]?\s*(\d+(?:\.\d+)?)",
+            msg,
+            re.I,
+        )
+        if m:
+            return _from_number(float(m.group(1)))
+        return None
+
+    # dict từ API
+    if isinstance(source, dict):
+        # Ưu tiên field chuyên cooldown (hay là ms)
+        for k in (
+            "time",
+            "Time",
+            "TIME",
+            "ms",
+            "remain",
+            "remaining",
+            "remain_time",
+            "remaining_time",
+            "countdown",
+            "cooldown",
+            "wait",
+            "wait_time",
+            "ttl",
+            "thoigian",
+            "thoi_gian",
+            "thoigianconlai",
+            "thoi_gian_con_lai",
+            "next_change",
+            "nextChange",
+            "change_after",
+            "retry_after",
+        ):
+            if k not in source or source[k] is None or source[k] == "":
+                continue
+            try:
+                n = float(source[k])
+            except (TypeError, ValueError):
+                # field string "35s"
+                got = _from_text(str(source[k]))
+                if got is not None:
+                    return got
+                continue
+            # heuristic: key có 'ms' hoặc value ≥ 1000 → ms
+            force_ms = "ms" in k.lower() or n >= 1000
+            got = _from_number(n, force_ms=force_ms)
+            if got is not None:
+                return got
+        # message trong body
+        for k in ("message", "msg", "error", "detail", "Message"):
+            if source.get(k):
+                got = _from_text(str(source.get(k)))
+                if got is not None:
+                    return got
+        # dump toàn dict thành text
+        got = _from_text(str(source))
+        if got is not None:
+            return got
+        return max(min_s, min(max_s, default))
+
+    got = _from_text(str(source or ""))
+    if got is not None:
+        return got
+    return max(min_s, min(max_s, default))
+
+
 def proxyxoay_shop_get(
     key: str,
     *,
@@ -1248,7 +1413,8 @@ def proxyxoay_shop_get(
     proxyxoay.shop rotating get.
     GET/POST https://proxyxoay.shop/api/get.php
     success status=100 → proxyhttp / proxysocks5
-    error status=101 / 102
+    error status=101 / 102 — thường kèm thời gian còn lại (s hoặc ms)
+      gói xoay 1 phút/lần → status=101 "Con Xs moi co the doi proxy"
     """
     key = (key or "").strip()
     if not key:
@@ -1270,8 +1436,11 @@ def proxyxoay_shop_get(
         raise RuntimeError(f"proxyxoay.shop non-json: {r.text[:200]}") from None
     st = data.get("status")
     if st != 100:
+        # Gắn wait_s vào exception để pipeline nghỉ đúng chu kỳ xoay
+        wait_s = parse_proxy_cooldown(data, default=60.0)
+        msg = data.get("message") or data.get("msg") or data
         raise RuntimeError(
-            f"proxyxoay.shop status={st}: {data.get('message') or data}"
+            f"proxyxoay.shop status={st}: {msg} | wait_s={wait_s:.1f}"
         )
     return data
 
@@ -1366,12 +1535,14 @@ def rotate_proxy_line(line: dict) -> str:
     """
     Change IP for one line → new http:// URL.
     - proxyxoay_net: change-key-ip + key-status
-    - proxyxoay_shop: get.php again (new exit)
-    - static: return same URL (caller may sleep)
+    - proxyxoay_shop: get.php again (new exit) — gói thường 1 phút/lần
+    - static / thiếu key: raise (caller nghỉ, không giả vờ đổi IP)
     """
     provider = detect_proxy_provider(line.get("provider"), line.get("host"))
     key = (line.get("api_key") or "").strip()
     if provider == "proxyxoay_shop" and key:
+        # luôn gọi API mới — đừng dùng url cache
+        line.pop("url", None)
         url = proxyxoay_shop_from_key(
             key,
             nhamang=line.get("shop_nhamang") or line.get("nhamang") or "random",
@@ -1385,14 +1556,14 @@ def rotate_proxy_line(line: dict) -> str:
         return url
     if provider == "proxyxoay_net" and key:
         proxyxoay_net_change_ip(key)
+        # status sau change — bỏ url cache
+        line.pop("url", None)
         url = proxyxoay_net_from_status(key)
         line["url"] = url
-        # refresh host/port hints if present in status path
         return url
-    # static — no rotate API
-    url = resolve_proxy_line(line)
-    line["url"] = url
-    return url
+    raise RuntimeError(
+        f"không xoay được proxy provider={provider} (cần api_key shop/net)"
+    )
 
 
 def fetch_proxyxoay(key: str | None = None, change_ip: bool = False) -> str:

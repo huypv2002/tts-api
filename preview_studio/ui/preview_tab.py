@@ -420,8 +420,8 @@ class BatchWorker(QThread):
             self.file_progress.emit(0, cur, total)
 
         try:
-            # Multi-lane: N proxy → N TTS song song · pool 3N · mint∥TTS
-            n_lines = max(1, len(self.proxy_lines) or (1 if self.proxy else 1))
+            # workers = admin max_workers: 1 proxy + 3 workers → 3 TTS song song
+            n_workers = max(1, min(5, int(self.workers or 1)))
             ok, fail = asyncio.run(
                 run_jobs(
                     jobs,
@@ -433,8 +433,8 @@ class BatchWorker(QThread):
                     lang=self.lang,
                     speed=self.speed,
                     hsw_workers=self.hsw_workers,
-                    workers=max(1, min(self.workers, n_lines)),
-                    tokens_per_lane=3,
+                    workers=n_workers,
+                    tokens_per_lane=max(3, n_workers),
                     max_attempts=40,
                     should_stop=lambda: self._stop,
                     on_start=on_start,
@@ -1390,11 +1390,35 @@ class PreviewTab(QtWidgets.QWidget):
                 except Exception:
                     size = "đã có"
             self.tbl_sub.setItem(local, 2, QtWidgets.QTableWidgetItem(size))
-            self.tbl_sub.setItem(
-                local, 3, QtWidgets.QTableWidgetItem(str(len(ch.get("text") or "")))
-            )
-            prev = (ch.get("text") or "")[:80]
-            if len(ch.get("text") or "") > 80:
+            # Ký tự = plain content (không tính thẻ <break>); tooltip = payload API
+            try:
+                from output_layout import plain_char_count
+
+                plain_n = int(
+                    ch.get("plain_chars")
+                    or plain_char_count(ch.get("text") or "")
+                )
+            except Exception:
+                plain_n = len(ch.get("text") or "")
+            payload_n = int(ch.get("payload_chars") or len(ch.get("text") or ""))
+            cell_chars = QtWidgets.QTableWidgetItem(str(plain_n))
+            if payload_n != plain_n:
+                cell_chars.setToolTip(
+                    f"Nội dung: {plain_n} · payload TTS (kèm break): {payload_n}"
+                    f" · max {int(self._max_chars or 0)}"
+                )
+            else:
+                cell_chars.setToolTip(f"≤ max {int(self._max_chars or 0)} ký tự/đoạn")
+            self.tbl_sub.setItem(local, 3, cell_chars)
+            # preview: strip break tags cho dễ đọc
+            try:
+                from output_layout import strip_ssml_breaks
+
+                prev_src = strip_ssml_breaks(ch.get("text") or "")
+            except Exception:
+                prev_src = ch.get("text") or ""
+            prev = prev_src[:80]
+            if len(prev_src) > 80:
                 prev += "…"
             self.tbl_sub.setItem(local, 4, QtWidgets.QTableWidgetItem(prev))
             item = QtWidgets.QTableWidgetItem(st)
@@ -1563,9 +1587,9 @@ class PreviewTab(QtWidgets.QWidget):
         if not ok_q:
             QtWidgets.QMessageBox.warning(self, "Hết gói ký tự", msg_q)
             return
-        # Scale: N proxy key → N TTS lanes · pool 3N token (cap max_workers)
+        # max_workers admin = số TTS đồng thời (1 proxy vẫn chạy đủ N luồng)
         mw = min(5, max(1, int(self.user.get("max_workers") or 5)))
-        proxy_lines = accounts.list_proxy_lines_for_gen(self.user, max_lanes=mw)
+        proxy_lines = accounts.list_proxy_lines_for_gen(self.user, max_lanes=5)
         if not proxy_lines:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -1575,9 +1599,8 @@ class PreviewTab(QtWidgets.QWidget):
                 "https://tts-origin.liveyt.pro/admin/",
             )
             return
-        n_lanes = len(proxy_lines)
-        workers = n_lanes
-        hsw = min(8, max(3, n_lanes * 3))  # farm ≈ token pool size
+        workers = mw  # 1 proxy + max_workers=3 → 3 luồng TTS
+        hsw = min(8, max(3, workers * 2))
         self._workers = workers
         self._hsw_workers = hsw
         self._persist_cfg()
@@ -1626,8 +1649,8 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
         self._set_status(
-            f"Đang tạo {len(self._chunks)} đoạn · {n_lanes} kênh song song · "
-            f"~{total_chars:,} ký tự…"
+            f"Đang tạo {len(self._chunks)} đoạn · {workers} luồng TTS · "
+            f"{len(proxy_lines)} proxy · ~{total_chars:,} ký tự…"
         )
 
     def _stop(self):
@@ -1654,7 +1677,14 @@ class PreviewTab(QtWidgets.QWidget):
             fname = self._chunks[row].get("file") or ""
             if ok:
                 self._chunks[row]["path"] = path
-                n = len(self._chunks[row].get("text") or "")
+                # trừ gói theo nội dung plain (không tính thẻ <break>)
+                ch = self._chunks[row]
+                try:
+                    from output_layout import plain_char_count
+
+                    n = int(ch.get("plain_chars") or plain_char_count(ch.get("text") or ""))
+                except Exception:
+                    n = len(ch.get("text") or "")
                 try:
                     accounts.consume_chars(self.user.get("id") or "", n)
                     full = accounts.get_account(self.user.get("id") or "")

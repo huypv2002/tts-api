@@ -1,0 +1,41 @@
+Nam: [friendly] Chào cậu!<break time="300ms"/> Lâu lắm rồi không gặp, dạo này ổn chứ?
+
+Nữ: [happy] Ổn lắm!<break time="200ms"/> Mới đổi việc xong, hơi mệt nhưng vui.
+
+Nam: [curious] Đổi việc á?<break time="250ms"/> Công ty nào vậy, nghe hấp dẫn ghê.
+
+Nữ: [excited] Bên làm sản phẩm âm thanh đó.<break time="200ms"/> Toàn nghe AI nói chuyện cả ngày, [laughs] về nhà còn váng.
+
+Nam: [laughs] Trời, đúng nghề của cậu luôn.<break time="300ms"/> Còn mình vẫn ngồi code, thỉnh thoảng cũng test giọng như vầy.
+
+Nữ: [friendly] Thấy chưa, hợp nhau quá.<break time="200ms"/> Tối nay rảnh không? Đi cà phê kể chuyện tiếp đi.
+
+Nam: [happy] Được luôn!<break time="250ms"/> Chỗ cũ gần công viên nhé, yên một chút.
+
+Nữ: [curious] Ừ.<break time="200ms"/> À mà cậu còn giữ cái tai nghe mình cho mượn không?
+
+Nam: [embarrassed] À…<break time="400ms"/> Để mình kiểm tra balo đã.<break time="300ms"/> Hình như đang ở nhà.
+
+Nữ: [sarcastic] Lại nữa.<break time="250ms"/> Lần nào cũng “hình như”.
+
+Nam: [laughs] Lần này thật mà!<break time="200ms"/> Tối mang theo luôn, thề.
+
+Nữ: [friendly] Thôi được.<break time="200ms"/> Mình order trước hai ly nhé, cậu thích gì?
+
+Nam: [calm] Bạc xỉu ít đường.<break time="300ms"/> Cảm ơn cậu nhiều.
+
+Nữ: [happy] Ok.<break time="200ms"/> Đừng trễ như lần trước nha.
+
+Nam: [excited] Không trễ!<break time="200ms"/> Mười lăm phút nữa có mặt.
+
+Nữ: [whispering] Này…<break time="350ms"/> Có chuyện này muốn kể, nhưng đợi gặp đã.
+
+Nam: [curious] Ơ, căng thế?<break time="250ms"/> Kể lẹ đi, tò mò chết.
+
+Nữ: [laughs] Không.<break time="200ms"/> Phải gặp mặt mới đã.<break time="300ms"/> Thôi, mình chạy đây.
+
+Nam: [friendly] Ok ok.<break time="200ms"/> Hẹn gặp!<break time="300ms"/> Đi cẩn thận.
+
+Nữ: [happy] Ừ, bai bai!<break time="200ms"/> [laughs] Nhớ mang tai nghe đấy.
+
+Nam: [sighs] Biết rồi…<break time="400ms"/> [friendly] Hẹn cậu tối nay.

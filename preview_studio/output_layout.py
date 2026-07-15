@@ -85,12 +85,25 @@ def safe_stem(name: str) -> str:
     return s or "doan"
 
 
+_SSML_BREAK_RE = re.compile(r"<break\s+time=\"\d+ms\"\s*/>", re.I)
+
+
+def strip_ssml_breaks(text: str) -> str:
+    """Bỏ thẻ <break …/> để đếm ký tự nội dung (plain)."""
+    return _SSML_BREAK_RE.sub("", text or "")
+
+
+def plain_char_count(text: str) -> int:
+    return len(strip_ssml_breaks(text or ""))
+
+
 def smart_split_text(text: str, max_chars: int = 300) -> List[str]:
     """
     Chia đoạn thông minh (gần v327):
     1) Cắt theo . ! ? 。！？ …
     2) Gói câu vào chunk ≤ max_chars
     3) Câu quá dài → cắt theo khoảng trắng
+    4) Từ quá dài → hard-cut
     """
     text = re.sub(r"[ \t]+", " ", (text or "").strip())
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -134,6 +147,16 @@ def _split_by_words(text: str, max_chars: int) -> List[str]:
     out: List[str] = []
     cur: List[str] = []
     for w in words:
+        if len(w) > max_chars:
+            # hard-cut từ/khối không khoảng trắng
+            if cur:
+                out.append(" ".join(cur))
+                cur = []
+            for i in range(0, len(w), max_chars):
+                piece = w[i : i + max_chars]
+                if piece:
+                    out.append(piece)
+            continue
         trial = (" ".join(cur + [w])).strip()
         if len(trial) > max_chars and cur:
             out.append(" ".join(cur))
@@ -143,6 +166,23 @@ def _split_by_words(text: str, max_chars: int) -> List[str]:
     if cur:
         out.append(" ".join(cur))
     return out
+
+
+def _bisect_plain(plain: str) -> Tuple[str, str]:
+    """Cắt plain gần giữa tại khoảng trắng (fallback)."""
+    plain = (plain or "").strip()
+    if len(plain) < 2:
+        return plain, ""
+    mid = len(plain) // 2
+    window = plain[:mid]
+    sp = window.rfind(" ")
+    if sp > max(10, mid // 4):
+        return plain[:sp].strip(), plain[sp:].strip()
+    # thử tìm space sau mid
+    sp2 = plain.find(" ", mid)
+    if sp2 > 0 and sp2 < len(plain) - 1:
+        return plain[:sp2].strip(), plain[sp2:].strip()
+    return plain[:mid].strip(), plain[mid:].strip()
 
 
 def split_paragraphs(text: str) -> List[str]:
@@ -268,34 +308,80 @@ def expand_paragraph_to_units(
     """
     1 paragraph → list (text, silence_after=0) ready for TTS.
 
-    pause_char (v327): smart_split plain text trước, rồi chèn <break> SSML
-    vào từng unit — KHÔNG split+silence merge.
+    max_chars = trần ĐỘ DÀI PAYLOAD gửi TTS (kể cả thẻ <break>).
+
+    Trước đây chỉ split text sạch ≤ max_chars rồi chèn SSML → payload phình
+    (vd admin 900 → cột Ký tự 1000+). Giờ re-pack đến khi len(payload) ≤ max_chars.
     """
     adv = normalize_advanced(advanced)
-    max_chars = max(40, int(max_chars or 300))
+    limit = max(40, int(max_chars or 300))
     para_text = (para_text or "").strip()
     if not para_text:
         return []
 
-    # Split theo max_chars trên text sạch (chưa có break tags)
-    subs = smart_split_text(para_text, max_chars)
-    if not subs:
-        return []
+    pause_on = bool(adv.get("pause_char_enabled"))
 
-    units: List[Tuple[str, float]] = []
-    for sub in subs:
-        text = sub
-        if adv["pause_char_enabled"]:
-            text = insert_ssml_breaks(
-                sub,
-                adv["char1"],
-                adv["char1_sec"],
-                adv["char2"],
-                adv["char2_sec"],
-            )
-        # silence_after luôn 0 — ngắt do <break> trong audio, không ghép silence
-        units.append((text, 0.0))
-    return units
+    def with_breaks(plain: str) -> str:
+        plain = (plain or "").strip()
+        if not plain:
+            return ""
+        if not pause_on:
+            return plain
+        return insert_ssml_breaks(
+            plain,
+            adv["char1"],
+            adv["char1_sec"],
+            adv["char2"],
+            adv["char2_sec"],
+        )
+
+    def pack_plain(plain: str, depth: int = 0) -> List[str]:
+        """Trả về list payload TTS, mỗi phần len ≤ limit."""
+        plain = (plain or "").strip()
+        if not plain:
+            return []
+        payload = with_breaks(plain)
+        if len(payload) <= limit:
+            return [payload]
+
+        # Quá dài sau SSML → chia nhỏ text sạch rồi pack lại
+        if depth > 14:
+            # an toàn: hard-cut plain theo tỉ lệ overhead
+            ratio = len(payload) / max(len(plain), 1)
+            cut = max(20, int(limit / max(ratio, 1.05)) - 2)
+            cut = min(cut, max(20, len(plain) - 1))
+            left, right = plain[:cut].strip(), plain[cut:].strip()
+            if not right:
+                # không cắt được — trả nguyên (hiếm, từ siêu dài)
+                return [payload]
+            return pack_plain(left, depth + 1) + pack_plain(right, depth + 1)
+
+        # Ước plain budget từ overhead SSML
+        ratio = len(payload) / max(len(plain), 1)
+        plain_budget = max(40, int(limit / max(ratio, 1.05) * 0.90))
+        # Không để budget ≥ plain (sẽ loop)
+        if plain_budget >= len(plain):
+            plain_budget = max(40, len(plain) // 2)
+
+        parts = smart_split_text(plain, plain_budget)
+        if len(parts) <= 1:
+            left, right = _bisect_plain(plain)
+            if not right or left == plain:
+                # hard cut
+                mid = max(20, len(plain) // 2)
+                left, right = plain[:mid].strip(), plain[mid:].strip()
+            if not right:
+                return [payload]
+            parts = [left, right]
+
+        out: List[str] = []
+        for p in parts:
+            out.extend(pack_plain(p, depth + 1))
+        return out
+
+    payloads = pack_plain(para_text)
+    # silence_after luôn 0 — ngắt do <break> trong audio
+    return [(t, 0.0) for t in payloads if t]
 
 
 def file_output_dir(output_root: str, file_name: str) -> str:
@@ -707,6 +793,9 @@ def build_chunks_from_sources(
                         "part": leaf_i,  # flat leaf index 1..N
                         "total_parts": total_parts,
                         "text": utext,
+                        # plain = nội dung (không tính thẻ <break>); payload = len gửi API
+                        "plain_chars": plain_char_count(utext),
+                        "payload_chars": len(utext or ""),
                         "out_path": out_p,
                         "file_dir": file_dir,
                         "para_path": para_merged_path(file_dir, pi)

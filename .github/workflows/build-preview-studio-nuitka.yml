@@ -1,4 +1,4 @@
-name: Build Preview Studio Nuitka
+name: Build TTS Studio Nuitka
 
 on:
   push:
@@ -77,7 +77,7 @@ jobs:
             --enable-plugin=pyside6 `
             --windows-console-mode=disable `
             --output-dir=preview_studio\dist-nuitka `
-            --output-filename="TTS Preview Studio.exe" `
+            --output-filename="TTS Studio.exe" `
             --include-module=fast_tts `
             --include-module=app_paths `
             --include-module=accounts_store `
@@ -85,6 +85,7 @@ jobs:
             --include-module=gen_pipeline `
             --include-module=output_layout `
             --include-module=ffmpeg_tools `
+            --include-module=multivoice `
             --include-package=ui `
             --include-package-data=certifi `
             --include-package-data=camoufox `
@@ -111,13 +112,13 @@ jobs:
         shell: pwsh
         run: |
           $dist = "preview_studio\dist-nuitka"
-          $exe = Join-Path $dist "TTS Preview Studio.exe"
+          $exe = Join-Path $dist "TTS Studio.exe"
           if (-not (Test-Path $exe)) {
             Write-Host "EXE missing, search..."
             Get-ChildItem -Recurse $dist -Filter "*.exe" | ForEach-Object { $_.FullName }
             exit 1
           }
-          $release = Join-Path $dist "TTS-Preview-Studio-Nuitka"
+          $release = Join-Path $dist "TTS-Studio-Nuitka"
           New-Item -ItemType Directory -Force -Path $release | Out-Null
           Copy-Item $exe $release
           Copy-Item preview_studio\silent_1s.mp3 $release -ErrorAction SilentlyContinue
@@ -129,16 +130,16 @@ jobs:
           @"
           @echo off
           cd /d "%~dp0"
-          start "" "TTS Preview Studio.exe"
-          "@ | Set-Content -Encoding ascii (Join-Path $release "run-preview-studio.bat")
+          start "" "TTS Studio.exe"
+          "@ | Set-Content -Encoding ascii (Join-Path $release "run-tts-studio.bat")
           @"
-          TTS Preview Studio — Nuitka onefile (Windows)
+          TTS Studio — Nuitka (Windows)
           1) Giữ silent_*.mp3 cạnh .exe
           2) Cài ffmpeg vào PATH
           3) Lần đầu: camoufox fetch nếu thiếu browser
-          4) Chạy TTS Preview Studio.exe hoặc run-preview-studio.bat
+          4) Chạy TTS Studio.exe hoặc run-tts-studio.bat
           "@ | Set-Content -Encoding utf8 (Join-Path $release "HUONG_DAN.txt")
-          $zip = "preview_studio\TTS-Preview-Studio-Nuitka-windows.zip"
+          $zip = "preview_studio\TTS-Studio-Nuitka-windows.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path $release -DestinationPath $zip -Force
           $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
@@ -149,8 +150,8 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: TTS-Preview-Studio-Nuitka-windows
-          path: preview_studio/TTS-Preview-Studio-Nuitka-windows.zip
+          name: TTS-Studio-Nuitka-windows
+          path: preview_studio/TTS-Studio-Nuitka-windows.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -158,13 +159,13 @@ jobs:
       - name: Publish rolling GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: preview-studio-windows-latest
-          name: Preview Studio Windows (Nuitka latest)
+          tag_name: tts-studio-windows-latest
+          name: TTS Studio Windows (Nuitka latest)
           body: |
-            Auto-built Nuitka onefile for Windows.
-            Download `TTS-Preview-Studio-Nuitka-windows.zip`, extract, run the `.exe`.
+            Auto-built Nuitka for Windows.
+            Download `TTS-Studio-Nuitka-windows.zip`, extract, run `TTS Studio.exe`.
             Requires: ffmpeg on PATH; first TTS may need Camoufox browser cache.
-          files: preview_studio/TTS-Preview-Studio-Nuitka-windows.zip
+          files: preview_studio/TTS-Studio-Nuitka-windows.zip
           draft: false
           prerelease: true
           make_latest: false
@@ -175,7 +176,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: preview_studio/TTS-Preview-Studio-Nuitka-windows.zip
+          files: preview_studio/TTS-Studio-Nuitka-windows.zip
           draft: false
           prerelease: false
         env:
