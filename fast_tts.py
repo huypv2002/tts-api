@@ -287,6 +287,15 @@ class HswFarm:
 
     async def _launch(self, browser_proxy: str | None) -> None:
         t0 = time.time()
+        # Portable: trỏ Camoufox vào camoufox-browser/ cạnh EXE (hoặc auto-fetch)
+        try:
+            from app_paths import ensure_camoufox_browser, setup_portable_runtime
+
+            setup_portable_runtime()
+            fox_dir = await asyncio.to_thread(ensure_camoufox_browser, True)
+            log(f"  [hsw-farm] camoufox dir={fox_dir}")
+        except Exception as e:
+            log(f"  [hsw-farm] camoufox setup warn: {e}")
         opts: dict = {
             "headless": True,
             "os": "windows",

@@ -16,10 +16,26 @@ from typing import List, Optional, Sequence, Tuple
 
 
 def find_ffmpeg() -> Optional[str]:
+    try:
+        from app_paths import find_portable_ffmpeg
+
+        p = find_portable_ffmpeg()
+        if p:
+            return p
+    except Exception:
+        pass
     return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
 
 
 def find_ffprobe() -> Optional[str]:
+    try:
+        from app_paths import find_portable_ffprobe
+
+        p = find_portable_ffprobe()
+        if p:
+            return p
+    except Exception:
+        pass
     return shutil.which("ffprobe") or shutil.which("ffprobe.exe")
 
 

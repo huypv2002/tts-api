@@ -142,20 +142,44 @@ cp -f "$ROOT/proxyxoay.example.json" "$RELEASE_DIR/" 2>/dev/null || true
 cp -f "$SCRIPT_DIR/requirements.txt" "$RELEASE_DIR/"
 cp -f "$SCRIPT_DIR/BUILD_NUITKA.md" "$RELEASE_DIR/" 2>/dev/null || true
 
+# Portable runtime (best-effort local build)
+mkdir -p "$RELEASE_DIR/bin" "$RELEASE_DIR/camoufox-browser"
+if command -v ffmpeg >/dev/null 2>&1; then
+  cp -f "$(command -v ffmpeg)" "$RELEASE_DIR/bin/" 2>/dev/null || true
+  command -v ffprobe >/dev/null 2>&1 && cp -f "$(command -v ffprobe)" "$RELEASE_DIR/bin/" 2>/dev/null || true
+fi
+# Copy local camoufox cache if present
+CAMOUFOX_DST="$RELEASE_DIR/camoufox-browser" $PY - <<'PY' || true
+import os, shutil
+from pathlib import Path
+try:
+    from camoufox.pkgman import INSTALL_DIR
+    src = Path(INSTALL_DIR)
+    dst = Path(os.environ.get("CAMOUFOX_DST") or "camoufox-browser")
+    if src.is_dir() and any(src.iterdir()):
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print("copied camoufox", src, "->", dst)
+    else:
+        print("no local camoufox cache; run: camoufox fetch")
+except Exception as e:
+    print("camoufox copy skip:", e)
+PY
+
 cat > "$RELEASE_DIR/HUONG_DAN.txt" <<'EOF'
-TTS Studio (Nuitka)
-===================
+TTS Studio — Portable
+=====================
 
-1) Giải nén cả thư mục (giữ file .exe/.app cạnh silent_*.mp3).
-2) Cài ffmpeg vào PATH (merge/cắt MP3).
-3) Lần đầu trên máy: nếu TTS báo thiếu browser Camoufox:
-     pip install camoufox
-     camoufox fetch
-4) Chạy "TTS Studio" (hoặc .exe trên Windows).
-5) Đăng nhập account (admin web Cloudflare / local).
-6) Gắn proxy nếu cần — xem proxyxoay.example.json.
+Giải nén CẢ THƯ MỤC rồi double-click "TTS Studio" / .exe.
 
-MP3 xuất mặc định: thư mục output/ cạnh file chạy.
+Kèm theo (bản full):
+  - bin/ffmpeg
+  - camoufox-browser/  (trình duyệt giải captcha)
+
+Không cần cài Python / ffmpeg / camoufox riêng nếu đủ 2 folder trên.
+
+Đăng nhập account do admin cấp. MP3 xuất vào output/ cạnh app.
 EOF
 
 # Launcher bat (Windows users unzip on Windows)

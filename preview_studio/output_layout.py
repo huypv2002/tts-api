@@ -432,6 +432,14 @@ def list_doan_files(file_dir: str) -> List[str]:
 
 
 def find_ffmpeg() -> Optional[str]:
+    try:
+        from app_paths import find_portable_ffmpeg
+
+        p = find_portable_ffmpeg()
+        if p:
+            return p
+    except Exception:
+        pass
     for name in ("ffmpeg", "ffmpeg.exe"):
         p = shutil.which(name)
         if p:

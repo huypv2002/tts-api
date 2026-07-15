@@ -366,6 +366,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     try:
+        # Portable: PATH bin/ + Camoufox cạnh EXE trước khi login/TTS
+        try:
+            from app_paths import setup_portable_runtime
+
+            setup_portable_runtime()
+        except Exception:
+            pass
         app = QtWidgets.QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
         login = LoginDialog()

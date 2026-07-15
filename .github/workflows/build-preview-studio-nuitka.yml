@@ -57,6 +57,58 @@ jobs:
           print('imports ok')
           "@
 
+      # Browser Camoufox (~300–700MB) — gói cạnh EXE để user double-click là chạy
+      - name: Fetch Camoufox browser (Windows)
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = (Resolve-Path ".").Path
+          python -m camoufox fetch
+          python -c @"
+          from camoufox.pkgman import INSTALL_DIR, launch_path
+          from pathlib import Path
+          p = Path(INSTALL_DIR)
+          print('INSTALL_DIR', p)
+          assert p.is_dir() and any(p.iterdir()), 'camoufox install empty'
+          print('launch', launch_path())
+          n = sum(1 for _ in p.rglob('*') if _.is_file())
+          sz = sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
+          print(f'files={n} size_mb={sz/1e6:.1f}')
+          "@
+
+      # ffmpeg static essentials — merge MP3 không cần cài PATH hệ thống
+      - name: Download portable ffmpeg (Windows)
+        shell: pwsh
+        run: |
+          $dest = "preview_studio\portable-runtime"
+          New-Item -ItemType Directory -Force -Path "$dest\bin" | Out-Null
+          $zip = "$env:RUNNER_TEMP\ffmpeg-essentials.zip"
+          $urls = @(
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip"
+          )
+          $ok = $false
+          foreach ($u in $urls) {
+            try {
+              Write-Host "Download $u"
+              Invoke-WebRequest -Uri $u -OutFile $zip -UseBasicParsing
+              $ok = $true
+              break
+            } catch {
+              Write-Host "fail: $_"
+            }
+          }
+          if (-not $ok) { throw "cannot download ffmpeg" }
+          $extract = "$env:RUNNER_TEMP\ffmpeg-extract"
+          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $ff = Get-ChildItem -Path $extract -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          $fp = Get-ChildItem -Path $extract -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          if (-not $ff) { throw "ffmpeg.exe not found in zip" }
+          Copy-Item $ff.FullName "$dest\bin\ffmpeg.exe" -Force
+          if ($fp) { Copy-Item $fp.FullName "$dest\bin\ffprobe.exe" -Force }
+          & "$dest\bin\ffmpeg.exe" -version | Select-Object -First 1
+          Write-Host "ffmpeg ready at $dest\bin"
+
       - name: Prepare CPU count
         id: pkg
         shell: pwsh
@@ -108,7 +160,7 @@ jobs:
             --lto=no `
             preview_studio\PreviewStudio.py
 
-      - name: Assemble release + ZIP
+      - name: Assemble portable release + ZIP
         shell: pwsh
         run: |
           $dist = "preview_studio\dist-nuitka"
@@ -119,31 +171,73 @@ jobs:
             exit 1
           }
           $release = Join-Path $dist "TTS-Studio-Nuitka"
+          if (Test-Path $release) { Remove-Item $release -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $release | Out-Null
+          New-Item -ItemType Directory -Force -Path "$release\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$release\camoufox-browser" | Out-Null
+
           Copy-Item $exe $release
           Copy-Item preview_studio\silent_1s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item preview_studio\silent_1_5s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item preview_studio\silent_05s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item proxyxoay.example.json $release -ErrorAction SilentlyContinue
-          Copy-Item preview_studio\requirements.txt $release
-          Copy-Item preview_studio\BUILD_NUITKA.md $release -ErrorAction SilentlyContinue
+          Copy-Item preview_studio\requirements.txt $release -ErrorAction SilentlyContinue
+
+          # ffmpeg portable
+          $ffSrc = "preview_studio\portable-runtime\bin"
+          if (Test-Path "$ffSrc\ffmpeg.exe") {
+            Copy-Item "$ffSrc\*" "$release\bin\" -Force
+            Write-Host "bundled ffmpeg ok"
+          } else {
+            throw "missing portable ffmpeg at $ffSrc"
+          }
+
+          # camoufox browser → camoufox-browser/
+          $fox = python -c "from camoufox.pkgman import INSTALL_DIR; print(INSTALL_DIR)"
+          $fox = $fox.Trim()
+          if (-not (Test-Path $fox)) { throw "camoufox INSTALL_DIR missing: $fox" }
+          Write-Host "Copy camoufox from $fox"
+          Copy-Item -Path (Join-Path $fox "*") -Destination "$release\camoufox-browser\" -Recurse -Force
+          $n = (Get-ChildItem "$release\camoufox-browser" -Recurse -File | Measure-Object).Count
+          if ($n -lt 5) { throw "camoufox-browser too small ($n files)" }
+          Write-Host "camoufox-browser files=$n"
+
           @"
           @echo off
           cd /d "%~dp0"
           start "" "TTS Studio.exe"
           "@ | Set-Content -Encoding ascii (Join-Path $release "run-tts-studio.bat")
           @"
-          TTS Studio — Nuitka (Windows)
-          1) Giữ silent_*.mp3 cạnh .exe
-          2) Cài ffmpeg vào PATH
-          3) Lần đầu: camoufox fetch nếu thiếu browser
-          4) Chạy TTS Studio.exe hoặc run-tts-studio.bat
+          TTS Studio — Portable (Windows)
+          ================================
+          Giải nén CẢ THƯ MỤC (không chỉ lấy mỗi file .exe).
+
+          Cấu trúc:
+            TTS Studio.exe
+            bin\ffmpeg.exe
+            camoufox-browser\   (trình duyệt Camoufox)
+            silent_*.mp3
+
+          Cách dùng:
+            1) Giải nén zip
+            2) Double-click "TTS Studio.exe" (hoặc run-tts-studio.bat)
+            3) Đăng nhập account admin cấp
+
+          Không cần cài Python / ffmpeg / camoufox riêng.
           "@ | Set-Content -Encoding utf8 (Join-Path $release "HUONG_DAN.txt")
+
           $zip = "preview_studio\TTS-Studio-Nuitka-windows.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path $release -DestinationPath $zip -Force
+          # Compress-Archive can choke on huge trees; use .NET zip
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            (Resolve-Path $release).Path,
+            (Join-Path (Resolve-Path "preview_studio").Path "TTS-Studio-Nuitka-windows.zip"),
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $true
+          )
           $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
-          Write-Host "ZIP: $zip ($sizeMB MB)"
+          Write-Host "ZIP: $zip ($sizeMB MB) — portable full"
 
       # Artifacts often hit free-tier storage quota; keep as best-effort only.
       - name: Upload artifact (best-effort)
@@ -162,9 +256,9 @@ jobs:
           tag_name: tts-studio-windows-latest
           name: TTS Studio Windows (Nuitka latest)
           body: |
-            Auto-built Nuitka for Windows.
-            Download `TTS-Studio-Nuitka-windows.zip`, extract, run `TTS Studio.exe`.
-            Requires: ffmpeg on PATH; first TTS may need Camoufox browser cache.
+            **Portable full** — giải nén cả folder, double-click `TTS Studio.exe`.
+            Kèm sẵn: Camoufox browser + ffmpeg (không cần cài thêm).
+            Download `TTS-Studio-Nuitka-windows.zip` (~300–800MB vì có browser).
           files: preview_studio/TTS-Studio-Nuitka-windows.zip
           draft: false
           prerelease: true
