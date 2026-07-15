@@ -43,3 +43,11 @@ loop_summary.json
 
 # large lock optional keep package-lock
 # package-lock.json
+
+# secrets / local runtime (do not commit)
+cloudflare-admin/.wrangler/
+preview_studio/accounts.json
+preview_studio/login_temp.json
+preview_studio/proxies.json
+preview_studio/preview_studio_config.json
+preview_studio/output/
