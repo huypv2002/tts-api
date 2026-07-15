@@ -18,9 +18,13 @@ from gen_pipeline import run_jobs
 from local_tts import fetch_voice_info
 from output_layout import (
     build_chunks_from_sources,
+    default_advanced,
     doan_path,
-    merge_doan_mp3s,
+    merge_file_from_chunks,
+    normalize_advanced,
+    parse_srt_cues,
     smart_split_text,
+    srt_to_plain_text,
 )
 
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
@@ -28,7 +32,6 @@ DEFAULT_MODEL = "eleven_v3"
 CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
 PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
 
-# Gap between chunks when merge (aligned with 11Labs0811 ~1.5s)
 try:
     from app_paths import app_dir, resource_dir
 
@@ -37,12 +40,137 @@ try:
 except Exception:
     _STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     SILENT_1S_PATH = os.path.join(_STUDIO_DIR, "silent_1s.mp3")
-CHUNK_GAP_SECONDS = 1.5
 
 
 def split_chunks(text: str, max_chars: int) -> List[str]:
     """Backward-compat — dùng smart_split_text (v327-style)."""
     return smart_split_text(text, max_chars)
+
+
+class AdvancedSettingsDialog(QtWidgets.QDialog):
+    """Cài đặt nâng cao — gap merge + pause char (v327)."""
+
+    def __init__(self, parent=None, settings: Optional[dict] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Cài đặt nâng cao")
+        self.setModal(True)
+        self.setMinimumWidth(380)
+        self._settings = normalize_advanced(settings)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        root = QtWidgets.QGridLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setVerticalSpacing(8)
+        r = 0
+
+        self.cb_gap = QtWidgets.QCheckBox("Ngắt âm giữa các đoạn")
+        self.cb_gap.setChecked(bool(self._settings.get("gap_enabled")))
+        root.addWidget(self.cb_gap, r, 0)
+
+        self.sb_gap = QtWidgets.QDoubleSpinBox()
+        self.sb_gap.setRange(0.0, 30.0)
+        self.sb_gap.setSingleStep(0.1)
+        self.sb_gap.setDecimals(1)
+        self.sb_gap.setValue(float(self._settings.get("gap_seconds") or 1.5))
+        self.sb_gap.setFixedWidth(70)
+        root.addWidget(self.sb_gap, r, 1)
+        root.addWidget(QtWidgets.QLabel("(s)"), r, 2)
+        r += 1
+
+        root.addWidget(QtWidgets.QLabel("    Cách nhau mỗi"), r, 0)
+        self.sb_every = QtWidgets.QSpinBox()
+        self.sb_every.setRange(1, 100)
+        self.sb_every.setValue(int(self._settings.get("gap_every") or 1))
+        self.sb_every.setFixedWidth(70)
+        root.addWidget(self.sb_every, r, 1)
+        root.addWidget(QtWidgets.QLabel("đoạn"), r, 2)
+        r += 1
+
+        tip_gap = QtWidgets.QLabel(
+            "SRT: khoảng lặng lấy theo timing phụ đề (ưu tiên hơn gap cố định)."
+        )
+        tip_gap.setObjectName("muted")
+        tip_gap.setWordWrap(True)
+        root.addWidget(tip_gap, r, 0, 1, 3)
+        r += 1
+
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        root.addWidget(line, r, 0, 1, 3)
+        r += 1
+
+        self.cb_pause = QtWidgets.QCheckBox(
+            "Ngắt âm theo ký tự (chèn <break> SSML — như v327)"
+        )
+        self.cb_pause.setChecked(bool(self._settings.get("pause_char_enabled")))
+        root.addWidget(self.cb_pause, r, 0, 1, 3)
+        r += 1
+
+        char_grid = QtWidgets.QGridLayout()
+        char_grid.setHorizontalSpacing(6)
+        char_grid.addWidget(QtWidgets.QLabel("Ký tự:"), 0, 0)
+        self.ed_char1 = QtWidgets.QLineEdit(str(self._settings.get("char1") or ","))
+        self.ed_char1.setMaxLength(1)
+        self.ed_char1.setFixedWidth(40)
+        char_grid.addWidget(self.ed_char1, 0, 1)
+        self.sb_char1 = QtWidgets.QDoubleSpinBox()
+        self.sb_char1.setRange(0.0, 10.0)
+        self.sb_char1.setSingleStep(0.1)
+        self.sb_char1.setDecimals(1)
+        self.sb_char1.setValue(float(self._settings.get("char1_sec") or 0.3))
+        self.sb_char1.setFixedWidth(70)
+        char_grid.addWidget(self.sb_char1, 0, 2)
+        char_grid.addWidget(QtWidgets.QLabel("(s)"), 0, 3)
+
+        char_grid.addWidget(QtWidgets.QLabel("Ký tự:"), 1, 0)
+        self.ed_char2 = QtWidgets.QLineEdit(str(self._settings.get("char2") or "."))
+        self.ed_char2.setMaxLength(1)
+        self.ed_char2.setFixedWidth(40)
+        char_grid.addWidget(self.ed_char2, 1, 1)
+        self.sb_char2 = QtWidgets.QDoubleSpinBox()
+        self.sb_char2.setRange(0.0, 10.0)
+        self.sb_char2.setSingleStep(0.1)
+        self.sb_char2.setDecimals(1)
+        self.sb_char2.setValue(float(self._settings.get("char2_sec") or 0.5))
+        self.sb_char2.setFixedWidth(70)
+        char_grid.addWidget(self.sb_char2, 1, 2)
+        char_grid.addWidget(QtWidgets.QLabel("(s)"), 1, 3)
+        root.addLayout(char_grid, r, 0, 1, 3)
+        r += 1
+
+        tip_p = QtWidgets.QLabel(
+            "Giống v327: chèn <break time=\"…ms\"/> sau ký tự trong cùng request TTS.\n"
+            "Không tách file / không silence merge. Paragraph: \\n\\n → doan_{para}."
+        )
+        tip_p.setWordWrap(True)
+        tip_p.setObjectName("muted")
+        root.addWidget(tip_p, r, 0, 1, 3)
+        r += 1
+
+        root.setRowStretch(r, 1)
+        r += 1
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns, r, 0, 1, 3)
+
+    def get_settings(self) -> dict:
+        return normalize_advanced(
+            {
+                "gap_enabled": self.cb_gap.isChecked(),
+                "gap_seconds": float(self.sb_gap.value()),
+                "gap_every": int(self.sb_every.value()),
+                "pause_char_enabled": self.cb_pause.isChecked(),
+                "char1": (self.ed_char1.text() or ",")[:1],
+                "char1_sec": float(self.sb_char1.value()),
+                "char2": (self.ed_char2.text() or ".")[:1],
+                "char2_sec": float(self.sb_char2.value()),
+            }
+        )
 
 
 class VoiceFetchWorker(QThread):
@@ -63,17 +191,24 @@ class VoiceFetchWorker(QThread):
 
 
 class LoadFilesWorker(QThread):
-    """Read files + split chunks off UI thread (layout v327-style)."""
+    """Read files + split chunks off UI thread (paragraph + SRT + pause-char)."""
 
     progress = Signal(str)
     done = Signal(object, object)  # sources, chunks
     failed = Signal(str)
 
-    def __init__(self, paths: List[str], max_chars: int, output_dir: str = ""):
+    def __init__(
+        self,
+        paths: List[str],
+        max_chars: int,
+        output_dir: str = "",
+        advanced: Optional[dict] = None,
+    ):
         super().__init__()
         self.paths = paths
         self.max_chars = max_chars
         self.output_dir = output_dir or ""
+        self.advanced = normalize_advanced(advanced)
 
     def run(self):
         try:
@@ -84,25 +219,40 @@ class LoadFilesWorker(QThread):
                 )
                 try:
                     if p.lower().endswith(".srt"):
-                        text = self._srt_to_text(p)
+                        cues = parse_srt_cues(p)
+                        text = (
+                            "\n\n".join(c["text"] for c in cues)
+                            if cues
+                            else srt_to_plain_text(p)
+                        )
+                        sources.append(
+                            {
+                                "file": os.path.basename(p),
+                                "path": p,
+                                "text": text,
+                                "srt_cues": cues or None,
+                            }
+                        )
                     else:
                         text = Path(p).read_text(encoding="utf-8", errors="ignore")
-                    sources.append(
-                        {"file": os.path.basename(p), "path": p, "text": text}
-                    )
+                        sources.append(
+                            {"file": os.path.basename(p), "path": p, "text": text}
+                        )
                 except Exception as e:
                     self.progress.emit(f"Lỗi đọc tệp {os.path.basename(p)}: {e}")
             self.progress.emit(
-                f"Đang chia đoạn (smart split ≤{self.max_chars} ký tự)…"
+                f"Đang chia đoạn văn + chunk (≤{self.max_chars} ký tự)…"
             )
             out_root = self.output_dir or os.path.join(
                 os.path.dirname(__file__), "..", "output"
             )
             os.makedirs(out_root, exist_ok=True)
             chunks = build_chunks_from_sources(
-                sources, int(self.max_chars or 300), out_root
+                sources,
+                int(self.max_chars or 300),
+                out_root,
+                advanced=self.advanced,
             )
-            # map existing mp3 → path for UI
             for ch in chunks:
                 op = ch.get("out_path") or ""
                 if op and os.path.isfile(op) and os.path.getsize(op) > 500:
@@ -110,17 +260,6 @@ class LoadFilesWorker(QThread):
             self.done.emit(sources, chunks)
         except Exception as e:
             self.failed.emit(str(e))
-
-    @staticmethod
-    def _srt_to_text(path: str) -> str:
-        raw = Path(path).read_text(encoding="utf-8", errors="ignore")
-        lines = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.isdigit() or "-->" in line:
-                continue
-            lines.append(line)
-        return " ".join(lines)
 
 
 class BatchWorker(QThread):
@@ -143,6 +282,7 @@ class BatchWorker(QThread):
         speed: float = 1.0,
         proxy_api_key: str = "",
         proxy_lines: Optional[List[dict]] = None,
+        advanced: Optional[dict] = None,
     ):
         super().__init__()
         self.chunks = chunks
@@ -157,6 +297,7 @@ class BatchWorker(QThread):
         self.speed = float(speed or 1.0)
         self.proxy_api_key = proxy_api_key or ""
         self.proxy_lines = list(proxy_lines or [])
+        self.advanced = normalize_advanced(advanced)
         self._stop = False
 
     def stop(self):
@@ -211,8 +352,13 @@ class BatchWorker(QThread):
             if self._stop:
                 return
             ch = self.chunks[row] if 0 <= row < len(self.chunks) else {}
+            para = ch.get("para_idx")
+            sub = ch.get("sub_idx")
+            label = f"doan_{para}"
+            if int(ch.get("total_subs") or 1) > 1:
+                label = f"doan_{para}_{sub}"
             self.log.emit(
-                f"▶ {ch.get('file')} · doan_{ch.get('part') or row+1}/"
+                f"▶ {ch.get('file')} · {label}/"
                 f"{ch.get('total_parts') or '?'} · "
                 f"{len(ch.get('text') or '')} ký tự"
             )
@@ -222,17 +368,16 @@ class BatchWorker(QThread):
 
         def try_merge_file(fname: str):
             meta = file_meta.get(fname) or {}
-            fdir = meta.get("file_dir") or ""
             mout = meta.get("merged_path") or ""
-            total_p = int(meta.get("total_parts") or 0)
-            if not fdir or not mout:
+            if not mout:
                 return
-            ok_m, msg = merge_doan_mp3s(
-                fdir,
-                mout,
-                expected_parts=total_p,
-                silent_between="",  # auto 1.5s silence (11Labs-style gap)
-                silence_seconds=CHUNK_GAP_SECONDS,
+            leaves = [
+                c
+                for c in self.chunks
+                if (c.get("file") or "") == fname
+            ]
+            ok_m, msg = merge_file_from_chunks(
+                leaves, mout, advanced=self.advanced
             )
             if ok_m:
                 self.log.emit(f"📦 {fname}: {msg}")
@@ -336,6 +481,9 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch: Optional[BatchWorker] = None
         self._load_worker: Optional[LoadFilesWorker] = None
         self._voice_worker: Optional[VoiceFetchWorker] = None
+        self._advanced = normalize_advanced((self._cfg or {}).get("advanced"))
+        self._loaded_paths: List[str] = []
+        self._loaded_kind = "txt"
         self._setup_ui()
         self._load_cfg()
         self._refresh_account_badge()
@@ -570,7 +718,11 @@ class PreviewTab(QtWidgets.QWidget):
         self.sb_speed.setValue(1.00)
         self.sb_speed.setToolTip("Tốc độ giọng nói (0.70 chậm – 1.20 nhanh)")
         opt.addWidget(self.sb_speed)
-        # Ổn định / Giống giọng gốc: ẩn — TTS dùng param mặc định, không truyền
+        self.bt_advanced = QtWidgets.QPushButton("Cài đặt nâng cao")
+        self.bt_advanced.setToolTip(
+            "Ngắt âm giữa đoạn / silence / gap_every / ngắt theo ký tự"
+        )
+        opt.addWidget(self.bt_advanced)
         opt.addStretch(1)
         self.lbl_chunk_summary = QtWidgets.QLabel("0 tệp / 0 đoạn")
         self.lbl_chunk_summary.setObjectName("badge")
@@ -580,6 +732,7 @@ class PreviewTab(QtWidgets.QWidget):
         self._max_chars = 300
         self._workers = 5
         self._hsw_workers = 5
+        self._advanced = default_advanced()
         self.ed_text = QtWidgets.QPlainTextEdit()
         self.ed_text.setReadOnly(True)
         self.ed_text.setPlaceholderText("Nội dung file sẽ hiển thị tại đây…")
@@ -704,6 +857,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.bt_folder.clicked.connect(self._pick_folder)
         self.bt_srt.clicked.connect(self._pick_srt)
         self.sb_speed.valueChanged.connect(self._on_setting_changed)
+        self.bt_advanced.clicked.connect(self._open_advanced)
         self.ed_output_dir.editingFinished.connect(self._persist_cfg)
         self.bt_browse_out.clicked.connect(self._browse_out)
         self.bt_start.clicked.connect(self._start)
@@ -783,6 +937,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.sb_speed.blockSignals(True)
         self.sb_speed.setValue(float(c.get("speed") if c.get("speed") is not None else 1.0))
         self.sb_speed.blockSignals(False)
+        self._advanced = normalize_advanced(c.get("advanced") or {})
         self.ed_voice_id.setText(c.get("voice_id") or DEFAULT_VOICE)
         self.ed_lang.setText(c.get("lang") or "en")
         self._reload_voice_combo(c.get("voice_id"))
@@ -800,11 +955,26 @@ class PreviewTab(QtWidgets.QWidget):
                 "voice_id": self.ed_voice_id.text().strip() or DEFAULT_VOICE,
                 "lang": self.ed_lang.text().strip() or "en",
                 "speed": float(self.sb_speed.value()),
+                "advanced": normalize_advanced(self._advanced),
                 "voices": voices,
             }
         )
         self.save_config(c)
         self._cfg = c
+
+    def _open_advanced(self):
+        dlg = AdvancedSettingsDialog(self, self._advanced)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self._advanced = dlg.get_settings()
+        self._persist_cfg()
+        # re-split if files already loaded so gap/pause/paragraph apply
+        paths = list(getattr(self, "_loaded_paths", None) or [])
+        if paths:
+            self._set_status("Đã lưu cài đặt nâng cao — đang chia lại đoạn…")
+            self._load_paths(paths, getattr(self, "_loaded_kind", "txt"))
+        else:
+            self._set_status("Đã lưu cài đặt nâng cao (gap / pause / SRT).")
 
     def _refresh_account_badge(self):
         pub = accounts.public_account(self.user)
@@ -1094,6 +1264,8 @@ class PreviewTab(QtWidgets.QWidget):
                 "Đang tạo audio — hãy bấm Dừng trước khi mở tệp mới"
             )
             return
+        self._loaded_paths = list(paths)
+        self._loaded_kind = source_type
         self.ed_input_path.setText(
             paths[0]
             if len(paths) == 1
@@ -1106,7 +1278,10 @@ class PreviewTab(QtWidgets.QWidget):
             os.path.dirname(__file__), "..", "output"
         )
         w = LoadFilesWorker(
-            paths, int(self._max_chars or 300), output_dir=out_dir
+            paths,
+            int(self._max_chars or 300),
+            output_dir=out_dir,
+            advanced=self._advanced,
         )
         self._load_worker = w
         w.progress.connect(self._set_status)
@@ -1188,12 +1363,21 @@ class PreviewTab(QtWidgets.QWidget):
         for local, abs_i in enumerate(range(start, end)):
             ch = self._chunks[abs_i]
             st = self._chunk_status.get(abs_i, "Chờ")
-            part = ch.get("part") or (abs_i + 1)
+            para = ch.get("para_idx")
+            sub = ch.get("sub_idx")
             total_p = ch.get("total_parts") or "?"
+            if para is not None:
+                if int(ch.get("total_subs") or 1) > 1:
+                    label = f"doan_{para}_{sub}/{total_p}"
+                else:
+                    label = f"doan_{para}/{total_p}"
+            else:
+                part = ch.get("part") or (abs_i + 1)
+                label = f"doan_{part}/{total_p}"
             self.tbl_sub.setItem(
                 local,
                 0,
-                QtWidgets.QTableWidgetItem(f"doan_{part}/{total_p}"),
+                QtWidgets.QTableWidgetItem(label),
             )
             self.tbl_sub.setItem(
                 local, 1, QtWidgets.QTableWidgetItem((ch.get("file") or "")[:40])
@@ -1433,6 +1617,7 @@ class PreviewTab(QtWidgets.QWidget):
             speed=float(self.sb_speed.value()),
             proxy_api_key=str(px_key or ""),
             proxy_lines=proxy_lines,
+            advanced=self._advanced,
         )
         self._batch.log.connect(self._set_status)
         self._batch.row_status.connect(self._on_row_status)

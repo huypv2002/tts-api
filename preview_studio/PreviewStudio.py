@@ -46,6 +46,16 @@ def load_config() -> dict:
         "voice_id": "NOpBlnGInO9m6vDvFkFC",
         "lang": "en",
         "speed": 1.0,
+        "advanced": {
+            "gap_enabled": True,
+            "gap_seconds": 1.5,
+            "gap_every": 1,
+            "pause_char_enabled": False,
+            "char1": ",",
+            "char1_sec": 0.3,
+            "char2": ".",
+            "char2_sec": 0.5,
+        },
         "voices": [
             {
                 "name": "Giọng mặc định",

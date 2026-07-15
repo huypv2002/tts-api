@@ -1,0 +1,73 @@
+# ElevenLabs eleven_v3 — test SSML/HTML <break> + audio tags cảm xúc
+# Load file này trong Preview Studio (model eleven_v3).
+# Bật "Ngắt âm theo ký tự" nếu muốn app tự chèn break sau , và .
+# File này đã ghi sẵn break + emotion tags để test trực tiếp.
+
+=== 1) BREAK / PAUSE (SSML) ===
+
+Hello.<break time="300ms"/> This is a short pause.
+Hello.<break time="500ms"/> This is half a second.
+Hello.<break time="1000ms"/> This is one full second of silence.
+Wait for it.<break time="1.5s"/> And we're back after one point five seconds.
+Step one.<break time="200ms"/> Step two.<break time="200ms"/> Step three.
+
+Comma style like v327 auto-insert:
+Ready, set, go. One more sentence after the period.
+
+=== 2) EMOTION / AUDIO TAGS (eleven_v3) ===
+
+[happy] I just got the best news of my life! Everything is wonderful!
+
+[sad] I never thought it would end like this. It hurts more than I can say.
+
+[angry] How many times do I have to tell you? This is completely unacceptable!
+
+[excited] We did it! We actually won the championship!
+
+[whispering] Can you keep a secret? Nobody else can know about this.
+
+[curious] Hmm, I wonder what is really going on behind that door.
+
+[sarcastic] Oh sure, that plan will work perfectly. What could possibly go wrong?
+
+[friendly] Hey there, friend! It is so nice to see you again.
+
+[calm] Take a deep breath. Everything is going to be okay.
+
+[nervous] Uh, are you sure this is safe? My hands are shaking a little.
+
+=== 3) MIX: emotion + break ===
+
+[excited] Yes!<break time="400ms"/> We finally made it to the finish line!
+
+[sad] I am sorry.<break time="800ms"/> I wish there was another way.
+
+[whispering] Listen carefully.<break time="500ms"/> The answer is under the third floorboard.
+
+[angry] Enough!<break time="300ms"/> I will not discuss this again.
+
+=== 4) LAUGH / SIGH / NON-VERBAL-ish tags ===
+
+That was hilarious. [laughs] I cannot believe you said that out loud.
+
+[sighs] Well, I guess we have no other choice now.
+
+Okay, fine. [clears throat] Let me start again from the beginning.
+
+=== 5) VIETNAMESE + break + emotion ===
+
+[happy] Chào bạn!<break time="400ms"/> Hôm nay trời đẹp quá, mình đi cà phê nhé.
+
+[sad] Xin lỗi.<break time="600ms"/> Mình không thể giúp được gì thêm nữa.
+
+[whispering] Nhẹ thôi.<break time="300ms"/> Đừng để ai nghe thấy chuyện này.
+
+[calm] Thở sâu vào.<break time="500ms"/> Rồi kể lại từ đầu, không vội.
+
+=== 6) PARAGRAPH SPLIT TEST (blank line = đoạn văn) ===
+
+Đoạn một: câu ngắn, dấu phẩy, và dấu chấm. App có thể chèn break nếu bật tùy chọn.
+
+Đoạn hai: [curious] Còn đoạn này sẽ là doan_2 riêng, sau khoảng nghỉ giữa các đoạn (gap merge).
+
+Đoạn ba: [friendly] Kết thúc file test. Cảm ơn bạn đã nghe!
