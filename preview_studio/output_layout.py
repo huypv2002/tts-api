@@ -132,6 +132,84 @@ def find_ffmpeg() -> Optional[str]:
     return None
 
 
+def concat_with_silence(
+    paths: list[str],
+    out_mp3: str,
+    silent_path: str,
+) -> tuple[bool, str]:
+    """
+    Concatenate multiple MP3 files with silence between them.
+    paths: list of MP3 file paths
+    out_mp3: output MP3 path
+    silent_path: path to silent MP3 to insert between files
+    Returns (ok, message)
+    """
+    if not paths:
+        return False, "no input files"
+    
+    if not silent_path or not os.path.isfile(silent_path):
+        # No silent file, just concat without silence
+        return _binary_concat_list(paths, out_mp3)
+    
+    # Build concat list with silence between each file
+    concat_list = []
+    for i, p in enumerate(paths):
+        concat_list.append(p)
+        if i < len(paths) - 1:  # Add silence between files (not after last)
+            concat_list.append(silent_path)
+    
+    return _binary_concat_list(concat_list, out_mp3)
+
+
+def _binary_concat_list(
+    paths: list[str],
+    out_mp3: str,
+) -> tuple[bool, str]:
+    """
+    Concatenate list of MP3 files using ffmpeg concat demuxer or binary fallback.
+    """
+    ffmpeg = find_ffmpeg()
+    
+    if ffmpeg:
+        list_path = ""
+        try:
+            fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="concat_silence_")
+            os.close(fd)
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in paths:
+                    ep = os.path.abspath(p).replace("'", "'\\''")
+                    f.write(f"file '{ep}'\n")
+            
+            cmd = [
+                ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                "-i", list_path, "-c", "copy", out_mp3
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and os.path.isfile(out_mp3) and os.path.getsize(out_mp3) > 500:
+                return True, f"concat {len(paths)} files"
+        except Exception as e:
+            pass
+        finally:
+            if list_path:
+                try:
+                    os.remove(list_path)
+                except Exception:
+                    pass
+    
+    # Binary fallback
+    try:
+        with open(out_mp3, "wb") as out:
+            for p in paths:
+                if os.path.isfile(p):
+                    with open(p, "rb") as inp:
+                        out.write(inp.read())
+        if os.path.isfile(out_mp3) and os.path.getsize(out_mp3) > 500:
+            return True, f"concat {len(paths)} files (binary)"
+        return False, "output too small"
+    except Exception as e:
+        return False, str(e)
+
+
 def merge_doan_mp3s(
     file_dir: str,
     out_mp3: str,
