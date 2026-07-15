@@ -105,7 +105,6 @@ jobs:
             --nofollow-import-to=PySide2 `
             --jobs=$cpu `
             --lto=no `
-            --no-pyi-file `
             preview_studio\PreviewStudio.py
 
       - name: Assemble release + ZIP
@@ -145,17 +144,36 @@ jobs:
           $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
           Write-Host "ZIP: $zip ($sizeMB MB)"
 
-      - name: Upload artifact
+      # Artifacts often hit free-tier storage quota; keep as best-effort only.
+      - name: Upload artifact (best-effort)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: TTS-Preview-Studio-Nuitka-windows
           path: preview_studio/TTS-Preview-Studio-Nuitka-windows.zip
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
-      - name: Create Release
+      # Primary deliverable: rolling prerelease (does not use Actions artifact quota)
+      - name: Publish rolling GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: preview-studio-windows-latest
+          name: Preview Studio Windows (Nuitka latest)
+          body: |
+            Auto-built Nuitka onefile for Windows.
+            Download `TTS-Preview-Studio-Nuitka-windows.zip`, extract, run the `.exe`.
+            Requires: ffmpeg on PATH; first TTS may need Camoufox browser cache.
+          files: preview_studio/TTS-Preview-Studio-Nuitka-windows.zip
+          draft: false
+          prerelease: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create versioned Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: preview_studio/TTS-Preview-Studio-Nuitka-windows.zip
           draft: false
