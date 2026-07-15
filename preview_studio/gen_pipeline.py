@@ -20,9 +20,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-_ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+from app_paths import ensure_sys_path  # noqa: E402
+
+ensure_sys_path()
 
 from fast_tts import (  # noqa: E402
     DEFAULT_MODEL,
@@ -262,8 +262,6 @@ async def run_jobs(
     model: str = DEFAULT_MODEL,
     lang: str = "en",
     speed: float = 1.0,
-    stability: float = 0.5,
-    similarity_boost: float = 0.75,
     hsw_workers: int = 0,
     workers: int = 1,  # legacy: used as max lanes if proxy_lines empty
     max_attempts: int = MAX_ATTEMPTS_PER_JOB,
@@ -381,10 +379,12 @@ async def run_jobs(
 
                 try:
                     if on_status:
+                        # UI: plain Vietnamese — no L1/host/mint jargon
                         on_status(
                             row,
-                            f"L{lane.lane_id} token… "
-                            f"(r={pool.ready}/{pool.target}, lần {att})",
+                            f"Đang chuẩn bị… (lần {att})"
+                            if att > 1
+                            else "Đang chuẩn bị…",
                         )
                     if on_start:
                         on_start(row)
@@ -403,16 +403,13 @@ async def run_jobs(
                     await asyncio.sleep(0)
 
                     if on_status:
-                        on_status(
-                            row,
-                            f"L{lane.lane_id} TTS@{_host_of(px)}∥mint… "
-                            f"(r={pool.ready} in={pool.inflight})",
-                        )
+                        on_status(row, "Đang tạo audio…")
                     log(
                         f"  [pipeline] đoạn {row+1} lane{lane.lane_id}: "
                         f"TTS@{_host_of(px)} token⇄proxy "
                         f"ready={pool.ready}/{pool.target} inflight={pool.inflight}"
                     )
+                    # stability/similarity: không truyền — TTS dùng mặc định API
                     audio = await call_tts(
                         text,
                         token,
@@ -421,8 +418,6 @@ async def run_jobs(
                         model,
                         lang,
                         speed,
-                        stability=stability,
-                        similarity_boost=similarity_boost,
                     )
                     pool.kick_refill()
                     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -440,15 +435,15 @@ async def run_jobs(
                     )
                     if _is_hard_401(e):
                         if on_status:
-                            on_status(row, f"L{lane.lane_id} 401 — đổi IP…")
+                            on_status(row, "Đổi kết nối…")
                         await lane.on_401()
                     elif _is_retryable(e):
                         if on_status:
-                            on_status(row, f"L{lane.lane_id} lỗi tạm…")
+                            on_status(row, "Lỗi tạm — thử lại…")
                         await lane.on_soft_fail(e)
                     else:
                         if on_status:
-                            on_status(row, f"L{lane.lane_id} lỗi ({att})")
+                            on_status(row, f"Lỗi — thử lại (lần {att})")
                         await asyncio.sleep(1.0 + random.uniform(0, 0.5))
 
             async with ok_lock:

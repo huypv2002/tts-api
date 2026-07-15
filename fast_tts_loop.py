@@ -299,7 +299,8 @@ async def one_tts(
     t0 = time.time()
     t_token = time.time()
     if token_pool is not None:
-        token = await token_pool.take(timeout=90.0)
+        # token⇄proxy: TTS phải dùng đúng proxy lúc solve
+        token, proxy = await token_pool.take(timeout=90.0)
     else:
         token = await solve_token(proxy)
     token_s = time.time() - t_token

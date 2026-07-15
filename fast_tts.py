@@ -728,25 +728,20 @@ async def call_tts(
     model_id: str,
     language_code: str,
     speed: float,
-    stability: float = 0.5,
-    similarity_boost: float = 0.75,
 ) -> bytes:
-    """POST anonymous stream endpoint (httpx, same proxy as token)."""
+    """POST anonymous stream endpoint (httpx, same proxy as token).
+
+    Chỉ gửi speed — stability / similarity_boost để API dùng mặc định.
+    """
     t0 = time.time()
     url = f"{API_BASE}/v1/text-to-speech/{voice_id}/stream/with-timestamps/anonymous"
-    # clamp voice_settings like ElevenLabs client ranges
+    # clamp speed like ElevenLabs client ranges
     speed = max(0.7, min(1.2, float(speed or 1.0)))
-    stability = max(0.0, min(1.0, float(stability if stability is not None else 0.5)))
-    similarity_boost = max(
-        0.0, min(1.0, float(similarity_boost if similarity_boost is not None else 0.75))
-    )
     payload = {
         "text": text,
         "model_id": model_id,
         "voice_settings": {
             "speed": speed,
-            "stability": stability,
-            "similarity_boost": similarity_boost,
         },
         "hcaptcha_token": hcaptcha_token,
         "language_code": language_code,

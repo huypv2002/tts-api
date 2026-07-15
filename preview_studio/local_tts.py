@@ -21,9 +21,9 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-_ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+from app_paths import ensure_sys_path  # noqa: E402
+
+ensure_sys_path()
 
 from fast_tts import (  # noqa: E402
     API_BASE,
@@ -389,8 +389,6 @@ async def synthesize_one(
     model: str = DEFAULT_MODEL,
     lang: str = "en",
     speed: float = 1.0,
-    stability: float = 0.5,
-    similarity_boost: float = 0.75,
     hsw_workers: int = 5,
 ) -> dict:
     """
@@ -409,10 +407,8 @@ async def synthesize_one(
 
     # Lấy lại một lần nữa sau solve (nếu rotate xảy ra concurrent)
     proxy = gate.get_proxy()
-    audio = await call_tts(
-        text, token, proxy, voice, model, lang, speed,
-        stability=stability, similarity_boost=similarity_boost,
-    )
+    # stability/similarity: không truyền — TTS dùng mặc định API
+    audio = await call_tts(text, token, proxy, voice, model, lang, speed)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_bytes(audio)
     return {"bytes": len(audio), "path": out_path}
@@ -430,8 +426,6 @@ async def synthesize_batch_async(
     model: str = DEFAULT_MODEL,
     lang: str = "en",
     speed: float = 1.0,
-    stability: float = 0.5,
-    similarity_boost: float = 0.75,
     workers: int = 5,
     hsw_workers: int = 5,
     proxy_api_key: str = "",
@@ -543,8 +537,6 @@ async def synthesize_batch_async(
                     model=model,
                     lang=lang,
                     speed=speed,
-                    stability=stability,
-                    similarity_boost=similarity_boost,
                     hsw_workers=hsw_workers,
                 )
                 await gate.report_ok()
@@ -609,8 +601,6 @@ def synthesize_one_sync(
     model: str = DEFAULT_MODEL,
     lang: str = "en",
     speed: float = 1.0,
-    stability: float = 0.5,
-    similarity_boost: float = 0.75,
     hsw_workers: int = 5,
 ) -> dict:
     """Single-shot sync helper. Dùng synthesize_batch_async cho multi-worker."""
@@ -623,8 +613,7 @@ def synthesize_one_sync(
     async def _run() -> dict:
         await ensure_farm(gate.get_proxy(), hsw_workers=hsw_workers)
         return await synthesize_one(
-            text, out_path, gate, voice, model, lang, speed,
-            stability, similarity_boost, hsw_workers,
+            text, out_path, gate, voice, model, lang, speed, hsw_workers,
         )
 
     return asyncio.run(_run())

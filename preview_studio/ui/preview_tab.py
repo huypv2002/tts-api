@@ -29,8 +29,14 @@ CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
 PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
 
 # Gap between chunks when merge (aligned with 11Labs0811 ~1.5s)
-_STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SILENT_1S_PATH = os.path.join(_STUDIO_DIR, "silent_1s.mp3")
+try:
+    from app_paths import app_dir, resource_dir
+
+    _STUDIO_DIR = app_dir()
+    SILENT_1S_PATH = os.path.join(resource_dir(), "silent_1s.mp3")
+except Exception:
+    _STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    SILENT_1S_PATH = os.path.join(_STUDIO_DIR, "silent_1s.mp3")
 CHUNK_GAP_SECONDS = 1.5
 
 
@@ -135,8 +141,6 @@ class BatchWorker(QThread):
         workers: int = 5,
         hsw_workers: int = 5,
         speed: float = 1.0,
-        stability: float = 0.5,
-        similarity_boost: float = 0.75,
         proxy_api_key: str = "",
         proxy_lines: Optional[List[dict]] = None,
     ):
@@ -151,10 +155,6 @@ class BatchWorker(QThread):
         self.workers = max(1, min(5, int(workers or 5)))
         self.hsw_workers = max(1, min(8, int(hsw_workers or 5)))
         self.speed = float(speed or 1.0)
-        self.stability = float(stability if stability is not None else 0.5)
-        self.similarity_boost = float(
-            similarity_boost if similarity_boost is not None else 0.75
-        )
         self.proxy_api_key = proxy_api_key or ""
         self.proxy_lines = list(proxy_lines or [])
         self._stop = False
@@ -287,8 +287,6 @@ class BatchWorker(QThread):
                     model=self.model,
                     lang=self.lang,
                     speed=self.speed,
-                    stability=self.stability,
-                    similarity_boost=self.similarity_boost,
                     hsw_workers=self.hsw_workers,
                     workers=max(1, min(self.workers, n_lines)),
                     tokens_per_lane=3,
@@ -572,28 +570,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.sb_speed.setValue(1.00)
         self.sb_speed.setToolTip("Tốc độ giọng nói (0.70 chậm – 1.20 nhanh)")
         opt.addWidget(self.sb_speed)
-        opt.addSpacing(10)
-        opt.addWidget(QtWidgets.QLabel("Ổn định"))
-        self.sb_stability = QtWidgets.QDoubleSpinBox()
-        self.sb_stability.setRange(0.0, 1.0)
-        self.sb_stability.setSingleStep(0.05)
-        self.sb_stability.setDecimals(2)
-        self.sb_stability.setValue(0.50)
-        self.sb_stability.setToolTip(
-            "Độ ổn định giọng (thấp = linh hoạt hơn, cao = đều hơn)"
-        )
-        opt.addWidget(self.sb_stability)
-        opt.addSpacing(10)
-        opt.addWidget(QtWidgets.QLabel("Giống giọng gốc"))
-        self.sb_similarity = QtWidgets.QDoubleSpinBox()
-        self.sb_similarity.setRange(0.0, 1.0)
-        self.sb_similarity.setSingleStep(0.05)
-        self.sb_similarity.setDecimals(2)
-        self.sb_similarity.setValue(0.75)
-        self.sb_similarity.setToolTip(
-            "Mức bám sát giọng gốc (cao = giống mẫu hơn)"
-        )
-        opt.addWidget(self.sb_similarity)
+        # Ổn định / Giống giọng gốc: ẩn — TTS dùng param mặc định, không truyền
         opt.addStretch(1)
         self.lbl_chunk_summary = QtWidgets.QLabel("0 tệp / 0 đoạn")
         self.lbl_chunk_summary.setObjectName("badge")
@@ -727,8 +704,6 @@ class PreviewTab(QtWidgets.QWidget):
         self.bt_folder.clicked.connect(self._pick_folder)
         self.bt_srt.clicked.connect(self._pick_srt)
         self.sb_speed.valueChanged.connect(self._on_setting_changed)
-        self.sb_stability.valueChanged.connect(self._on_setting_changed)
-        self.sb_similarity.valueChanged.connect(self._on_setting_changed)
         self.ed_output_dir.editingFinished.connect(self._persist_cfg)
         self.bt_browse_out.clicked.connect(self._browse_out)
         self.bt_start.clicked.connect(self._start)
@@ -806,22 +781,8 @@ class PreviewTab(QtWidgets.QWidget):
         self._workers = 5
         self._hsw_workers = 5
         self.sb_speed.blockSignals(True)
-        self.sb_stability.blockSignals(True)
-        self.sb_similarity.blockSignals(True)
         self.sb_speed.setValue(float(c.get("speed") if c.get("speed") is not None else 1.0))
-        self.sb_stability.setValue(
-            float(c.get("stability") if c.get("stability") is not None else 0.5)
-        )
-        self.sb_similarity.setValue(
-            float(
-                c.get("similarity_boost")
-                if c.get("similarity_boost") is not None
-                else 0.75
-            )
-        )
         self.sb_speed.blockSignals(False)
-        self.sb_stability.blockSignals(False)
-        self.sb_similarity.blockSignals(False)
         self.ed_voice_id.setText(c.get("voice_id") or DEFAULT_VOICE)
         self.ed_lang.setText(c.get("lang") or "en")
         self._reload_voice_combo(c.get("voice_id"))
@@ -839,8 +800,6 @@ class PreviewTab(QtWidgets.QWidget):
                 "voice_id": self.ed_voice_id.text().strip() or DEFAULT_VOICE,
                 "lang": self.ed_lang.text().strip() or "en",
                 "speed": float(self.sb_speed.value()),
-                "stability": float(self.sb_stability.value()),
-                "similarity_boost": float(self.sb_similarity.value()),
                 "voices": voices,
             }
         )
@@ -1256,12 +1215,25 @@ class PreviewTab(QtWidgets.QWidget):
             self.tbl_sub.setItem(local, 4, QtWidgets.QTableWidgetItem(prev))
             item = QtWidgets.QTableWidgetItem(st)
             st_l = st.lower()
-            if st == "Xong" or st_l == "xong":
+            if st == "Xong" or st_l == "xong" or "đã merge" in st_l:
                 item.setForeground(QtGui.QColor("#166534"))
-            elif "lỗi" in st_l:
+            elif st_l.startswith("lỗi") and "thử lại" not in st_l:
                 item.setForeground(QtGui.QColor("#991b1b"))
-            elif "đang" in st_l or "chạy" in st_l:
+            elif any(
+                k in st_l
+                for k in (
+                    "đang",
+                    "chạy",
+                    "chờ",
+                    "chuẩn bị",
+                    "đổi",
+                    "thử lại",
+                    "xếp lại",
+                )
+            ):
                 item.setForeground(QtGui.QColor("#b45309"))
+            elif "lỗi" in st_l:
+                item.setForeground(QtGui.QColor("#b45309"))  # retrying
             self.tbl_sub.setItem(local, 5, item)
         self.tbl_sub.setUpdatesEnabled(True)
         self.lbl_page.setText(
@@ -1279,11 +1251,24 @@ class PreviewTab(QtWidgets.QWidget):
             if 0 <= local < self.tbl_sub.rowCount():
                 item = QtWidgets.QTableWidgetItem(status)
                 st_l = status.lower()
-                if status == "Xong" or st_l == "xong":
+                if status == "Xong" or st_l == "xong" or "đã merge" in st_l:
                     item.setForeground(QtGui.QColor("#166534"))
-                elif "lỗi" in st_l:
+                elif st_l.startswith("lỗi") and "thử lại" not in st_l:
                     item.setForeground(QtGui.QColor("#991b1b"))
-                elif "đang" in st_l or "chạy" in st_l:
+                elif any(
+                    k in st_l
+                    for k in (
+                        "đang",
+                        "chạy",
+                        "chờ",
+                        "chuẩn bị",
+                        "đổi",
+                        "thử lại",
+                        "xếp lại",
+                    )
+                ):
+                    item.setForeground(QtGui.QColor("#b45309"))
+                elif "lỗi" in st_l:
                     item.setForeground(QtGui.QColor("#b45309"))
                 self.tbl_sub.setItem(local, 5, item)
 
@@ -1446,8 +1431,6 @@ class PreviewTab(QtWidgets.QWidget):
             workers=workers,
             hsw_workers=hsw,
             speed=float(self.sb_speed.value()),
-            stability=float(self.sb_stability.value()),
-            similarity_boost=float(self.sb_similarity.value()),
             proxy_api_key=str(px_key or ""),
             proxy_lines=proxy_lines,
         )
@@ -1458,8 +1441,7 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
         self._set_status(
-            f"Đang tạo {len(self._chunks)} đoạn · {n_lanes} lane TTS · "
-            f"pool {n_lanes * 3} token · proxy: {labels} · "
+            f"Đang tạo {len(self._chunks)} đoạn · {n_lanes} kênh song song · "
             f"~{total_chars:,} ký tự…"
         )
 

@@ -51,3 +51,7 @@ preview_studio/login_temp.json
 preview_studio/proxies.json
 preview_studio/preview_studio_config.json
 preview_studio/output/
+
+# Nuitka build
+preview_studio/dist-nuitka/
+nuitka-crash-report.xml

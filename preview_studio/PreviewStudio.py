@@ -17,9 +17,10 @@ import traceback
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
-if _APP_DIR not in sys.path:
-    sys.path.insert(0, _APP_DIR)
+from app_paths import app_dir, ensure_sys_path  # noqa: E402
+
+ensure_sys_path()
+_APP_DIR = app_dir()
 
 import accounts_store as accounts  # noqa: E402
 from ui.edit_mp3_tab import EditMp3Tab  # noqa: E402
@@ -45,8 +46,6 @@ def load_config() -> dict:
         "voice_id": "NOpBlnGInO9m6vDvFkFC",
         "lang": "en",
         "speed": 1.0,
-        "stability": 0.5,
-        "similarity_boost": 0.75,
         "voices": [
             {
                 "name": "Giọng mặc định",

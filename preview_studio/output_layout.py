@@ -138,20 +138,29 @@ def ensure_silence_mp3(seconds: float = 1.5, studio_dir: str = "") -> str:
     Default 1.5s — typical pause between doan_* when merging.
     Returns path or "" if ffmpeg unavailable.
     """
+    from app_paths import app_dir, resource_dir
+
     seconds = float(seconds or 0)
     if seconds <= 0:
         return ""
-    root = studio_dir or os.path.dirname(os.path.abspath(__file__))
+    # Pre-shipped assets (Nuitka bundle) vs writable cache next to EXE
+    res = studio_dir or resource_dir()
+    cache = studio_dir or app_dir()
     # e.g. silent_1_5s.mp3
     name = f"silent_{str(seconds).replace('.', '_')}s.mp3"
-    out = os.path.join(root, name)
-    if os.path.isfile(out) and os.path.getsize(out) > 500:
-        return out
+    for root in (res, cache):
+        candidate = os.path.join(root, name)
+        if os.path.isfile(candidate) and os.path.getsize(candidate) > 500:
+            return candidate
+    out = os.path.join(cache, name)
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         # fallback to pre-shipped 1s if close enough
-        fallback = os.path.join(root, "silent_1s.mp3")
-        return fallback if os.path.isfile(fallback) else ""
+        for root in (res, cache):
+            fallback = os.path.join(root, "silent_1s.mp3")
+            if os.path.isfile(fallback):
+                return fallback
+        return ""
     try:
         cmd = [
             ffmpeg,
@@ -175,8 +184,11 @@ def ensure_silence_mp3(seconds: float = 1.5, studio_dir: str = "") -> str:
             return out
     except Exception:
         pass
-    fallback = os.path.join(root, "silent_1s.mp3")
-    return fallback if os.path.isfile(fallback) else ""
+    for root in (res, cache):
+        fallback = os.path.join(root, "silent_1s.mp3")
+        if os.path.isfile(fallback):
+            return fallback
+    return ""
 
 
 def merge_doan_mp3s(
@@ -202,9 +214,7 @@ def merge_doan_mp3s(
     # Resolve silence file (prefer explicit path, else generate 1.5s)
     silence_path = silent_between if silent_between and os.path.isfile(silent_between) else ""
     if not silence_path and silence_seconds and silence_seconds > 0 and len(parts) > 1:
-        silence_path = ensure_silence_mp3(
-            silence_seconds, studio_dir=os.path.dirname(os.path.abspath(__file__))
-        )
+        silence_path = ensure_silence_mp3(silence_seconds)
 
     has_silent = bool(silence_path and os.path.isfile(silence_path))
     concat_list: list[str] = []

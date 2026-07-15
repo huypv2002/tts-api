@@ -11,7 +11,9 @@ import secrets
 import time
 from typing import Any, Optional
 
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+from app_paths import app_dir  # noqa: E402
+
+_APP_DIR = app_dir()
 ACCOUNTS_FILE = os.path.join(_APP_DIR, "accounts.json")
 PROXIES_FILE = os.path.join(_APP_DIR, "proxies.json")
 PACKAGES_FILE = os.path.join(_APP_DIR, "packages.json")
