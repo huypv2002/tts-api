@@ -18,7 +18,6 @@ from gen_pipeline import run_jobs
 from local_tts import fetch_voice_info
 from output_layout import (
     build_chunks_from_sources,
-    concat_with_silence,
     doan_path,
     merge_doan_mp3s,
     smart_split_text,
@@ -29,9 +28,8 @@ DEFAULT_MODEL = "eleven_v3"
 CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
 PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
 
-# Silent MP3 files for pause between chunks/punctuation
+# Silent MP3 for 1s pause between chunks
 _STUDIO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SILENT_05S_PATH = os.path.join(_STUDIO_DIR, "silent_05s.mp3")
 SILENT_1S_PATH = os.path.join(_STUDIO_DIR, "silent_1s.mp3")
 
 
@@ -245,14 +243,6 @@ class BatchWorker(QThread):
             ch = self.chunks[row] if 0 <= row < len(self.chunks) else {}
             fname = ch.get("file") or ""
             if success:
-                # Post-process: split MP3 at punctuation timestamps (ratio-based) → concat with 0.5s silence
-                if path and os.path.isfile(path):
-                    from output_layout import insert_punctuation_silence
-                    text = ch.get("text") or ""
-                    ok_p = insert_punctuation_silence(path, text, SILENT_05S_PATH)
-                    if ok_p:
-                        self.log.emit(f"🔇 {fname} doan_{ch.get('part') or row+1}: inserted silence at punctuation")
-                
                 if path:
                     ch["path"] = path
                 self.row_status.emit(row, "Xong")
