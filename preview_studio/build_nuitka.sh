@@ -84,6 +84,9 @@ $PY -m nuitka \
   --include-package=playwright \
   --include-package=browserforge \
   --include-package=apify_fingerprint_datapoints \
+  --include-package=language_tags \
+  --include-package=ua_parser \
+  --include-package=screeninfo \
   --include-package=platformdirs \
   --include-package=tls_client \
   --include-package-data=certifi \
@@ -91,6 +94,7 @@ $PY -m nuitka \
   --include-package-data=playwright \
   --include-package-data=browserforge \
   --include-package-data=apify_fingerprint_datapoints \
+  --include-package-data=language_tags \
   --include-package-data=tls_client \
   --include-data-files="$SCRIPT_DIR/silent_1s.mp3=silent_1s.mp3" \
   --include-data-files="$SCRIPT_DIR/silent_1_5s.mp3=silent_1_5s.mp3" \
