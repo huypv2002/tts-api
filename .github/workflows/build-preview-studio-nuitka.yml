@@ -43,8 +43,12 @@ jobs:
           mods = [
               'PySide6', 'PySide6.QtWidgets', 'httpx', 'tls_client',
               'camoufox', 'camoufox.async_api', 'playwright', 'browserforge',
-              'numpy', 'platformdirs', 'jwt', 'fast_tts',
+              'apify_fingerprint_datapoints', 'numpy', 'platformdirs', 'jwt', 'fast_tts',
           ]
+          from apify_fingerprint_datapoints import get_input_network
+          p = get_input_network()
+          assert p.is_file(), p
+          print('  OK datapoint', p)
           err = []
           for m in mods:
               try:
@@ -149,12 +153,14 @@ jobs:
             --include-package=camoufox `
             --include-package=playwright `
             --include-package=browserforge `
+            --include-package=apify_fingerprint_datapoints `
             --include-package=platformdirs `
             --include-package=tls_client `
             --include-package-data=certifi `
             --include-package-data=camoufox `
             --include-package-data=playwright `
             --include-package-data=browserforge `
+            --include-package-data=apify_fingerprint_datapoints `
             --include-package-data=tls_client `
             --include-data-files=preview_studio\silent_1s.mp3=silent_1s.mp3 `
             --include-data-files=preview_studio\silent_1_5s.mp3=silent_1_5s.mp3 `
@@ -172,6 +178,44 @@ jobs:
             --jobs=$cpu `
             --lto=no `
             preview_studio\PreviewStudio.py
+
+      # Bắt buộc: browserforge đọc zip trong apify_fingerprint_datapoints/data/
+      - name: Verify fingerprint datapoints in dist
+        shell: pwsh
+        run: |
+          $distDir = Get-ChildItem -Path "preview_studio\dist-nuitka" -Directory -Filter "*.dist" | Select-Object -First 1
+          if (-not $distDir) { throw "no *.dist" }
+          $need = @(
+            "apify_fingerprint_datapoints\data\input-network-definition.zip",
+            "apify_fingerprint_datapoints\data\header-network-definition.zip",
+            "apify_fingerprint_datapoints\data\fingerprint-network-definition.zip",
+            "apify_fingerprint_datapoints\data\headers-order.json",
+            "apify_fingerprint_datapoints\data\browser-helper-file.json"
+          )
+          $missing = @()
+          foreach ($rel in $need) {
+            $p = Join-Path $distDir.FullName $rel
+            if (Test-Path $p) { Write-Host "OK $rel" }
+            else { Write-Host "MISSING $rel"; $missing += $rel }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "--- tree apify* ---"
+            Get-ChildItem -Path $distDir.FullName -Recurse -Filter "*fingerprint*" -ErrorAction SilentlyContinue | Select-Object -First 40 FullName
+            # Fallback: copy from site-packages if Nuitka missed package-data
+            $src = python -c "import apify_fingerprint_datapoints, pathlib; print(pathlib.Path(apify_fingerprint_datapoints.__file__).parent)"
+            $src = $src.Trim()
+            $dst = Join-Path $distDir.FullName "apify_fingerprint_datapoints"
+            Write-Host "Fallback copy $src -> $dst"
+            New-Item -ItemType Directory -Force -Path $dst | Out-Null
+            Copy-Item -Path (Join-Path $src "*") -Destination $dst -Recurse -Force
+            foreach ($rel in $need) {
+              $p = Join-Path $distDir.FullName $rel
+              if (-not (Test-Path $p)) { throw "still missing $rel after fallback" }
+              Write-Host "OK after copy $rel"
+            }
+          }
+          # Quick import smoke from dist (optional — uses system python only for path check)
+          Write-Host "datapoints verified"
 
       - name: Assemble portable release + ZIP
         shell: pwsh

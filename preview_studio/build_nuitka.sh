@@ -83,12 +83,14 @@ $PY -m nuitka \
   --include-package=camoufox \
   --include-package=playwright \
   --include-package=browserforge \
+  --include-package=apify_fingerprint_datapoints \
   --include-package=platformdirs \
   --include-package=tls_client \
   --include-package-data=certifi \
   --include-package-data=camoufox \
   --include-package-data=playwright \
   --include-package-data=browserforge \
+  --include-package-data=apify_fingerprint_datapoints \
   --include-package-data=tls_client \
   --include-data-files="$SCRIPT_DIR/silent_1s.mp3=silent_1s.mp3" \
   --include-data-files="$SCRIPT_DIR/silent_1_5s.mp3=silent_1_5s.mp3" \
