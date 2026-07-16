@@ -128,7 +128,7 @@ jobs:
             --standalone `
             --assume-yes-for-downloads `
             --enable-plugin=pyside6 `
-            --windows-console-mode=disable `
+            --windows-console-mode=force `
             --force-stderr-spec="{PROGRAM_DIR}/studio_stderr.txt" `
             --force-stdout-spec="{PROGRAM_DIR}/studio_stdout.txt" `
             --include-qt-plugins=sensible,styles,platforms,iconengines,imageformats,tls,generic `
@@ -226,30 +226,63 @@ jobs:
           @"
           @echo off
           cd /d "%~dp0"
+          echo [CHAY-STUDIO] folder=%cd%
           if exist "TTS Studio.exe" (
-            start "" "TTS Studio.exe"
+            "TTS Studio.exe"
           ) else if exist "TTSStudio.exe" (
-            start "" "TTSStudio.exe"
+            "TTSStudio.exe"
           ) else if exist "PreviewStudio.exe" (
-            start "" "PreviewStudio.exe"
+            "PreviewStudio.exe"
           ) else (
             echo EXE not found in %~dp0
             dir /b *.exe
-            pause
           )
+          echo.
+          echo Neu app tat ngay: mo studio_boot.log / studio_stderr.txt
+          echo TEMP log: %TEMP%\tts_studio_boot.log
+          pause
           "@ | Set-Content -Encoding ascii (Join-Path $release "CHAY-STUDIO.bat")
+
+          @"
+          @echo off
+          cd /d "%~dp0"
+          echo ==== DEBUG RUN ====
+          echo folder=%cd%
+          dir /b *.exe
+          echo.
+          if exist "TTS Studio.exe" ( "TTS Studio.exe" ) else if exist "TTSStudio.exe" ( "TTSStudio.exe" ) else ( "PreviewStudio.exe" )
+          echo exitcode=%ERRORLEVEL%
+          echo.
+          echo ---- studio_boot.log ----
+          if exist studio_boot.log ( type studio_boot.log ) else ( echo (chua co studio_boot.log canh EXE) )
+          echo.
+          echo ---- studio_stderr.txt ----
+          if exist studio_stderr.txt ( type studio_stderr.txt ) else ( echo (chua co) )
+          echo.
+          echo ---- TEMP tts_studio_boot.log ----
+          if exist "%TEMP%\tts_studio_boot.log" ( type "%TEMP%\tts_studio_boot.log" ) else ( echo (chua co) )
+          echo.
+          pause
+          "@ | Set-Content -Encoding ascii (Join-Path $release "CHAY-DEBUG.bat")
 
           @"
           TTS Studio — Portable (Windows)
           ================================
-          1) Giải nén CẢ THƯ MỤC (không chỉ copy 1 file .exe)
-          2) Double-click  CHAY-STUDIO.bat  hoặc  TTS Studio.exe
-          3) Nếu không hiện cửa sổ: mở studio_boot.log / studio_stderr.txt cạnh EXE
+          1) Giải nén CẢ THƯ MỤC
+          2) Chạy CHAY-STUDIO.bat  (hoặc TTS Studio.exe / TTSStudio.exe)
+          3) Nếu không lên app → chạy CHAY-DEBUG.bat và chụp màn hình console
 
-          Có sẵn:
-            - Qt/DLL (standalone)
-            - bin\ffmpeg.exe
-            - camoufox-browser\
+          LOG LỖI (theo thứ tự tìm):
+            A) Cùng thư mục EXE:
+                 studio_boot.log
+                 studio_stderr.txt
+                 studio_stdout.txt
+                 preview_studio_crash.log
+            B) %TEMP%\tts_studio_boot.log
+               (thường: C:\Users\<ban>\AppData\Local\Temp\tts_studio_boot.log)
+            C) Desktop\tts_studio_boot.log
+
+          Có sẵn: Qt/DLL, bin\ffmpeg.exe, camoufox-browser\
           "@ | Set-Content -Encoding utf8 (Join-Path $release "HUONG_DAN.txt")
 
           $zip = "preview_studio\TTS-Studio-Nuitka-windows.zip"

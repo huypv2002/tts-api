@@ -13,19 +13,117 @@ import base64
 import json
 import os
 import sys
+import time
 import traceback
 
-from PySide6 import QtCore, QtGui, QtWidgets
 
-from app_paths import app_dir, ensure_sys_path  # noqa: E402
+def _early_boot_paths() -> list[str]:
+    """Nhiều chỗ ghi log — tránh miss khi app_dir sai / one-file TEMP."""
+    paths: list[str] = []
+    try:
+        if sys.argv and sys.argv[0]:
+            d = os.path.dirname(os.path.abspath(sys.argv[0]))
+            if d:
+                paths.append(os.path.join(d, "studio_boot.log"))
+    except Exception:
+        pass
+    try:
+        d = os.path.dirname(os.path.abspath(sys.executable or ""))
+        if d:
+            paths.append(os.path.join(d, "studio_boot.log"))
+    except Exception:
+        pass
+    try:
+        paths.append(os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or ".", "tts_studio_boot.log"))
+    except Exception:
+        pass
+    try:
+        desk = os.path.join(os.path.expanduser("~"), "Desktop", "tts_studio_boot.log")
+        paths.append(desk)
+    except Exception:
+        pass
+    # unique preserve order
+    out, seen = [], set()
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out or ["studio_boot.log"]
 
-ensure_sys_path()
-_APP_DIR = app_dir()
 
-import accounts_store as accounts  # noqa: E402
-from ui.edit_mp3_tab import EditMp3Tab  # noqa: E402
-from ui.multivoice_tab import MultivoiceTab  # noqa: E402
-from ui.preview_tab import PreviewTab  # noqa: E402
+def _early_log(msg: str) -> None:
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
+    for p in _early_boot_paths():
+        try:
+            parent = os.path.dirname(p)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            continue
+
+
+def _early_msgbox(title: str, message: str) -> None:
+    _early_log(f"MSGBOX {title}: {message[:500]}")
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, str(message)[:1800], str(title)[:120], 0x10)
+            return
+    except Exception:
+        pass
+    try:
+        print(title, message, file=sys.stderr)
+    except Exception:
+        pass
+
+
+_early_log("=== process start ===")
+_early_log(f"argv0={sys.argv[0] if sys.argv else ''} executable={sys.executable}")
+_early_log(f"cwd={os.getcwd()}")
+
+try:
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    _early_log("PySide6 import OK")
+except Exception as e:
+    _early_log(f"PySide6 import FAIL: {e}\n{traceback.format_exc()}")
+    _early_msgbox(
+        "TTS Studio — thiếu Qt",
+        f"Không load được PySide6/Qt:\n{e}\n\n"
+        "Xem log:\n- studio_boot.log (cạnh EXE)\n"
+        "- %TEMP%\\tts_studio_boot.log\n"
+        "- Desktop\\tts_studio_boot.log",
+    )
+    raise SystemExit(2)
+
+try:
+    from app_paths import app_dir, ensure_sys_path  # noqa: E402
+
+    ensure_sys_path()
+    _APP_DIR = app_dir()
+    _early_log(f"app_dir={_APP_DIR}")
+except Exception as e:
+    _early_log(f"app_paths FAIL: {e}\n{traceback.format_exc()}")
+    _early_msgbox("TTS Studio — lỗi path", str(e))
+    raise SystemExit(2)
+
+try:
+    import accounts_store as accounts  # noqa: E402
+    from ui.edit_mp3_tab import EditMp3Tab  # noqa: E402
+    from ui.multivoice_tab import MultivoiceTab  # noqa: E402
+    from ui.preview_tab import PreviewTab  # noqa: E402
+
+    _early_log("UI modules import OK")
+except Exception as e:
+    _early_log(f"UI import FAIL: {e}\n{traceback.format_exc()}")
+    _early_msgbox(
+        "TTS Studio — lỗi import",
+        f"{e}\n\nXem studio_boot.log cạnh EXE hoặc %TEMP%\\tts_studio_boot.log",
+    )
+    raise SystemExit(2)
 
 APP_NAME = "ElevenLabs Unlimited Studio"
 LOGIN_TEMP_FILE = os.path.join(_APP_DIR, "login_temp.json")
@@ -415,15 +513,21 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
-    except SystemExit:
+        _early_log("calling main()")
+        code = main()
+        _early_log(f"main() exit code={code}")
+        raise SystemExit(code)
+    except SystemExit as se:
+        _early_log(f"SystemExit {se.code}")
         raise
     except BaseException as e:
-        try:
-            from app_paths import show_fatal_dialog, write_boot_log
-
-            write_boot_log(f"unhandled: {e}\n{traceback.format_exc()}")
-            show_fatal_dialog("TTS Studio — lỗi", f"{e}\n\nXem studio_boot.log cạnh EXE")
-        except Exception:
-            pass
-        raise
+        tb = traceback.format_exc()
+        _early_log(f"unhandled: {e}\n{tb}")
+        _early_msgbox(
+            "TTS Studio — lỗi",
+            f"{e}\n\nLog:\n"
+            "- studio_boot.log (cùng thư mục EXE)\n"
+            "- %TEMP%\\tts_studio_boot.log\n"
+            "- Desktop\\tts_studio_boot.log",
+        )
+        raise SystemExit(1)
