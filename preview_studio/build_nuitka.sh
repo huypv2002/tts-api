@@ -80,8 +80,15 @@ $PY -m nuitka \
   --include-module=ffmpeg_tools \
   --include-module=multivoice \
   --include-package=ui \
+  --include-package=camoufox \
+  --include-package=playwright \
+  --include-package=browserforge \
+  --include-package=platformdirs \
+  --include-package=tls_client \
   --include-package-data=certifi \
   --include-package-data=camoufox \
+  --include-package-data=playwright \
+  --include-package-data=browserforge \
   --include-package-data=tls_client \
   --include-data-files="$SCRIPT_DIR/silent_1s.mp3=silent_1s.mp3" \
   --include-data-files="$SCRIPT_DIR/silent_1_5s.mp3=silent_1_5s.mp3" \
@@ -89,7 +96,6 @@ $PY -m nuitka \
   --nofollow-import-to=tkinter \
   --nofollow-import-to=_tkinter \
   --nofollow-import-to=matplotlib \
-  --nofollow-import-to=numpy \
   --nofollow-import-to=pandas \
   --nofollow-import-to=scipy \
   --nofollow-import-to=IPython \

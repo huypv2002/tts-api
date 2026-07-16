@@ -61,9 +61,18 @@ except ImportError:
 
 try:
     from camoufox.async_api import AsyncCamoufox
-except ImportError:
-    print("Missing camoufox: pip3 install camoufox && camoufox fetch", file=sys.stderr)
-    sys.exit(1)
+except ImportError as _camoufox_imp_err:  # noqa: F841
+    AsyncCamoufox = None  # type: ignore[misc, assignment]
+    # Không sys.exit — app UI vẫn mở; lỗi hiện khi start HSW/TTS
+    def _camoufox_missing(*_a, **_k):  # type: ignore[misc]
+        raise RuntimeError(
+            "Thiếu package camoufox trong bản build (không phải thiếu folder browser).\n"
+            f"Import error: {_camoufox_imp_err}\n"
+            "Cần rebuild Nuitka với --include-package=camoufox --include-package=playwright.\n"
+            "Portable: vẫn cần folder camoufox-browser/ cạnh EXE."
+        )
+
+    AsyncCamoufox = _camoufox_missing  # type: ignore[misc, assignment]
 
 SITEKEY = "8e58fe8c-1a48-4f94-88ae-8e90b586a192"
 HOST = "elevenlabs.io"
@@ -287,6 +296,11 @@ class HswFarm:
 
     async def _launch(self, browser_proxy: str | None) -> None:
         t0 = time.time()
+        if AsyncCamoufox is None or not callable(AsyncCamoufox):
+            raise RuntimeError(
+                "Package camoufox chưa được đóng gói vào EXE. "
+                "Cần bản build có --include-package=camoufox."
+            )
         # Portable: trỏ Camoufox vào camoufox-browser/ cạnh EXE (hoặc auto-fetch)
         try:
             from app_paths import ensure_camoufox_browser, setup_portable_runtime
@@ -296,6 +310,7 @@ class HswFarm:
             log(f"  [hsw-farm] camoufox dir={fox_dir}")
         except Exception as e:
             log(f"  [hsw-farm] camoufox setup warn: {e}")
+            # nếu chỉ thiếu browser folder nhưng package OK — vẫn thử launch (camoufox tự fetch)
         opts: dict = {
             "headless": True,
             "os": "windows",
@@ -303,7 +318,13 @@ class HswFarm:
         }
         if browser_proxy:
             opts["proxy"] = {"server": browser_proxy}
-        cm = AsyncCamoufox(**opts)
+        try:
+            cm = AsyncCamoufox(**opts)
+        except TypeError:
+            # fallback nếu AsyncCamoufox bị gán stub
+            raise RuntimeError(
+                "Không khởi tạo được Camoufox. Kiểm tra package + folder camoufox-browser/."
+            ) from None
         self._cm = cm
         if hasattr(cm, "start"):
             self._browser = await cm.start()
