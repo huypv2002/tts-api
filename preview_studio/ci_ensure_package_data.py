@@ -38,6 +38,7 @@ PACKAGES = [
 ]
 
 # Files that MUST exist after copy (fail CI if missing)
+# Note: camoufox/GeoLite2-City.mmdb is OPTIONAL (geoip extra) — not on all installs
 REQUIRED = [
     "apify_fingerprint_datapoints/data/input-network-definition.zip",
     "apify_fingerprint_datapoints/data/header-network-definition.zip",
@@ -52,6 +53,15 @@ REQUIRED = [
     "camoufox/warnings.yml",
     "browserforge/injectors/data/utils.js.xz",
     "certifi/cacert.pem",
+]
+
+# Nice-to-have (log only)
+OPTIONAL = [
+    "camoufox/GeoLite2-City.mmdb",
+    "camoufox/webgl/webgl_data.db",
+    "camoufox/territoryInfo.xml",
+    "playwright/driver/package/api.json",
+    "tls_client/dependencies/tls-client-64.dll",
 ]
 
 SKIP_SUFFIX = {".py", ".pyc", ".pyo", ".pyi"}
@@ -116,12 +126,18 @@ def main() -> int:
 
     missing = []
     for rel in REQUIRED:
-        p = dist / rel.replace("/", "\\") if False else dist.joinpath(*rel.split("/"))
+        p = dist.joinpath(*rel.split("/"))
         if p.is_file() and p.stat().st_size > 0:
             print("  OK", rel, f"({p.stat().st_size}B)")
         else:
             print("  MISSING", rel)
             missing.append(rel)
+    for rel in OPTIONAL:
+        p = dist.joinpath(*rel.split("/"))
+        if p.is_file() and p.stat().st_size > 0:
+            print("  OPT-OK", rel, f"({p.stat().st_size}B)")
+        else:
+            print("  OPT-SKIP", rel)
     if missing:
         print("FAIL missing required data:", missing)
         return 1

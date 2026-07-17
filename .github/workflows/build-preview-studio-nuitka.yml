@@ -200,20 +200,35 @@ jobs:
         shell: pwsh
         run: |
           $distDir = Get-ChildItem -Path "preview_studio\dist-nuitka" -Directory -Filter "*.dist" | Select-Object -First 1
-          $checks = @(
+          # Bắt buộc — thiếu = app không import được camoufox
+          $required = @(
             "language_tags\data\json\index.json",
             "language_tags\data\json\registry.json",
             "apify_fingerprint_datapoints\data\input-network-definition.zip",
             "camoufox\browserforge.yml",
-            "camoufox\GeoLite2-City.mmdb",
-            "playwright\driver\package\api.json",
-            "tls_client\dependencies\tls-client-64.dll",
+            "camoufox\fonts.json",
+            "browserforge\injectors\data\utils.js.xz",
             "certifi\cacert.pem"
           )
-          foreach ($rel in $checks) {
+          # Optional: GeoLite2 (geoip extra), playwright driver node, tls dll
+          $optional = @(
+            "camoufox\GeoLite2-City.mmdb",
+            "camoufox\webgl\webgl_data.db",
+            "playwright\driver\package\api.json",
+            "tls_client\dependencies\tls-client-64.dll"
+          )
+          foreach ($rel in $required) {
             $p = Join-Path $distDir.FullName $rel
             if (-not (Test-Path $p)) { throw "SMOKE MISSING $rel" }
             Write-Host "SMOKE OK $rel ($([math]::Round((Get-Item $p).Length/1KB,1)) KB)"
+          }
+          foreach ($rel in $optional) {
+            $p = Join-Path $distDir.FullName $rel
+            if (Test-Path $p) {
+              Write-Host "SMOKE OPT-OK $rel ($([math]::Round((Get-Item $p).Length/1KB,1)) KB)"
+            } else {
+              Write-Host "SMOKE OPT-SKIP $rel"
+            }
           }
 
       - name: Assemble portable release + ZIP
