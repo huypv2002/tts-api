@@ -23,6 +23,12 @@ from output_layout import merge_audio_with_gaps, safe_stem
 
 DEFAULT_MODEL = "eleven_v3"
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
+MODEL_CHOICES = [
+    ("eleven_v3", "eleven_v3 — chất lượng / cảm xúc"),
+    ("eleven_turbo_v2_5", "eleven_turbo_v2_5 — cân bằng"),
+    ("eleven_flash_v2_5", "eleven_flash_v2_5 — nhanh + hỗ trợ vi"),
+    ("eleven_multilingual_v2", "eleven_multilingual_v2 — đa ngôn ngữ"),
+]
 
 
 class MultivoiceWorker(QThread):
@@ -66,6 +72,7 @@ class MultivoiceWorker(QThread):
         workers: int = 1,
         hsw_workers: int = 0,
         max_attempts: int = 0,
+        model: str = DEFAULT_MODEL,
     ):
         super().__init__()
         self.jobs = list(jobs or [])
@@ -79,6 +86,7 @@ class MultivoiceWorker(QThread):
         self.workers = max(1, min(5, int(workers or 1)))
         self.hsw_workers = int(hsw_workers or 0)
         self.max_attempts = int(max_attempts or self.MAX_ATTEMPTS)
+        self.model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
         self._stop = False
 
     def stop(self):
@@ -260,7 +268,7 @@ class MultivoiceWorker(QThread):
                             proxy_api_key=self.proxy_api_key,
                             proxy_lines=self.proxy_lines or None,
                             voice=DEFAULT_VOICE,  # overridden per-job voice
-                            model=DEFAULT_MODEL,
+                            model=self.model,
                             lang=self.lang,
                             speed=self.speed,
                             hsw_workers=hsw_n,
@@ -511,6 +519,17 @@ class MultivoiceTab(QtWidgets.QWidget):
         src_l.addLayout(src_top)
 
         opt = QtWidgets.QHBoxLayout()
+        opt.addWidget(QtWidgets.QLabel("Model"))
+        self.cb_model = QtWidgets.QComboBox()
+        self.cb_model.setMinimumHeight(28)
+        self.cb_model.setMinimumWidth(240)
+        for mid, label in MODEL_CHOICES:
+            self.cb_model.addItem(label, mid)
+        self.cb_model.setToolTip(
+            "Model ElevenLabs (anonymous).\n"
+            "multilingual_v2 không ép language_code=vi."
+        )
+        opt.addWidget(self.cb_model)
         opt.addWidget(QtWidgets.QLabel("Gap lượt"))
         self.sb_gap = QtWidgets.QDoubleSpinBox()
         self.sb_gap.setRange(0.0, 5.0)
@@ -676,6 +695,8 @@ class MultivoiceTab(QtWidgets.QWidget):
         self.bt_open.clicked.connect(self._open_out)
         self.bt_edit.clicked.connect(self._open_edit)
         self.ed_script.textChanged.connect(self._on_script_changed)
+        self.cb_model.currentIndexChanged.connect(lambda *_: self._persist())
+        self.sb_gap.valueChanged.connect(lambda *_: self._persist())
         self.tbl_files.itemSelectionChanged.connect(self._on_file_selected)
         self.tbl_files.cellDoubleClicked.connect(self._open_queue_file)
         self.tbl_turns.cellDoubleClicked.connect(self._open_turn_audio)
@@ -725,6 +746,14 @@ class MultivoiceTab(QtWidgets.QWidget):
             self.sb_gap.setValue(float(mv.get("gap_seconds", 0.35)))
         except Exception:
             self.sb_gap.setValue(0.35)
+        # model: multivoice.model > global model > default
+        mid = (mv.get("model") or c.get("model") or DEFAULT_MODEL).strip()
+        idx = self.cb_model.findData(mid)
+        if idx < 0:
+            idx = self.cb_model.findData(DEFAULT_MODEL)
+        self.cb_model.blockSignals(True)
+        self.cb_model.setCurrentIndex(max(0, idx if idx >= 0 else 0))
+        self.cb_model.blockSignals(False)
         cast = mv.get("cast") or []
         self.tbl_cast.setRowCount(0)
         if cast:
@@ -752,11 +781,14 @@ class MultivoiceTab(QtWidgets.QWidget):
                 vid = (w.currentData() or "").strip()
             if name:
                 cast.append({"name": name, "voice_id": vid})
+        mid = (self.cb_model.currentData() or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        c["model"] = mid  # đồng bộ tab Tạo audio
         c["multivoice"] = {
             "script": self.ed_script.toPlainText(),
             "cast": cast,
             "project_name": self.ed_name.text().strip() or "dialogue",
             "gap_seconds": float(self.sb_gap.value()),
+            "model": mid,
         }
         self.save_config(c)
         self._cfg = c
@@ -1221,6 +1253,7 @@ class MultivoiceTab(QtWidgets.QWidget):
         if not px_key and proxy_lines:
             px_key = proxy_lines[0].get("api_key") or ""
 
+        model = (self.cb_model.currentData() or DEFAULT_MODEL).strip() or DEFAULT_MODEL
         self._worker = MultivoiceWorker(
             jobs=jobs,
             output_dir=out,
@@ -1233,6 +1266,7 @@ class MultivoiceTab(QtWidgets.QWidget):
             workers=n_workers,
             hsw_workers=hsw,
             max_attempts=40,
+            model=model,
         )
         self._worker.log.connect(self._set_status)
         self._worker.turn_status.connect(self._on_turn_status)
@@ -1245,7 +1279,7 @@ class MultivoiceTab(QtWidgets.QWidget):
             (p.get("label") or p.get("id") or "?") for p in proxy_lines[:3]
         )
         self._set_status(
-            f"{n_workers} luồng TTS · {len(proxy_lines)} proxy · "
+            f"model {model} · {n_workers} luồng · {len(proxy_lines)} proxy · "
             f"{len(jobs)} tệp · {n_turns} lượt · proxy: {labels}"
         )
 

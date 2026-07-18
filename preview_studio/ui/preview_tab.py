@@ -29,6 +29,13 @@ from output_layout import (
 
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
 DEFAULT_MODEL = "eleven_v3"
+# model_id, nhãn UI (user chọn)
+MODEL_CHOICES = [
+    ("eleven_v3", "eleven_v3 — chất lượng / cảm xúc"),
+    ("eleven_turbo_v2_5", "eleven_turbo_v2_5 — cân bằng"),
+    ("eleven_flash_v2_5", "eleven_flash_v2_5 — nhanh + hỗ trợ vi"),
+    ("eleven_multilingual_v2", "eleven_multilingual_v2 — đa ngôn ngữ"),
+]
 CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
 PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
 
@@ -710,6 +717,18 @@ class PreviewTab(QtWidgets.QWidget):
         source_l.addLayout(src_top)
         # voice_settings (payload TTS) — không show luồng/HSW/max đoạn (admin web + fixed 5)
         opt = QtWidgets.QHBoxLayout()
+        opt.addWidget(QtWidgets.QLabel("Model"))
+        self.cb_model = QtWidgets.QComboBox()
+        self.cb_model.setMinimumHeight(30)
+        self.cb_model.setMinimumWidth(260)
+        for mid, label in MODEL_CHOICES:
+            self.cb_model.addItem(label, mid)
+        self.cb_model.setToolTip(
+            "Model ElevenLabs (anonymous).\n"
+            "• v3 / turbo_v2_5 / flash_v2_5: gửi language_code từ giọng đã lưu\n"
+            "• multilingual_v2: không ép language_code (tránh 400 với vi)"
+        )
+        opt.addWidget(self.cb_model)
         opt.addWidget(QtWidgets.QLabel("Tốc độ đọc"))
         self.sb_speed = QtWidgets.QDoubleSpinBox()
         self.sb_speed.setRange(0.70, 1.20)
@@ -857,6 +876,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.bt_folder.clicked.connect(self._pick_folder)
         self.bt_srt.clicked.connect(self._pick_srt)
         self.sb_speed.valueChanged.connect(self._on_setting_changed)
+        self.cb_model.currentIndexChanged.connect(self._on_setting_changed)
         self.bt_advanced.clicked.connect(self._open_advanced)
         self.ed_output_dir.editingFinished.connect(self._persist_cfg)
         self.bt_browse_out.clicked.connect(self._browse_out)
@@ -925,6 +945,23 @@ class PreviewTab(QtWidgets.QWidget):
     def _on_setting_changed(self, *_args):
         self._persist_cfg()
 
+    def _selected_model(self) -> str:
+        mid = (self.cb_model.currentData() or "").strip()
+        if mid:
+            return mid
+        return DEFAULT_MODEL
+
+    def _set_model_combo(self, model_id: str) -> None:
+        want = (model_id or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        idx = self.cb_model.findData(want)
+        if idx < 0:
+            idx = self.cb_model.findData(DEFAULT_MODEL)
+        if idx < 0:
+            idx = 0
+        self.cb_model.blockSignals(True)
+        self.cb_model.setCurrentIndex(max(0, idx))
+        self.cb_model.blockSignals(False)
+
     def _load_cfg(self):
         c = self._cfg
         self.ed_output_dir.setText(
@@ -937,6 +974,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.sb_speed.blockSignals(True)
         self.sb_speed.setValue(float(c.get("speed") if c.get("speed") is not None else 1.0))
         self.sb_speed.blockSignals(False)
+        self._set_model_combo(c.get("model") or DEFAULT_MODEL)
         self._advanced = normalize_advanced(c.get("advanced") or {})
         self.ed_voice_id.setText(c.get("voice_id") or DEFAULT_VOICE)
         self.ed_lang.setText(c.get("lang") or "en")
@@ -954,6 +992,7 @@ class PreviewTab(QtWidgets.QWidget):
                 "hsw_workers": 5,
                 "voice_id": self.ed_voice_id.text().strip() or DEFAULT_VOICE,
                 "lang": self.ed_lang.text().strip() or "en",
+                "model": self._selected_model(),
                 "speed": float(self.sb_speed.value()),
                 "advanced": normalize_advanced(self._advanced),
                 "voices": voices,
@@ -1628,13 +1667,15 @@ class PreviewTab(QtWidgets.QWidget):
         labels = ", ".join(
             (p.get("label") or p.get("id") or "?") for p in proxy_lines
         )
+        model = self._selected_model()
+        self._persist_cfg()
         self._batch = BatchWorker(
             chunks=self._chunks,
             output_dir=out,
             proxy=proxy,
             voice=self.ed_voice_id.text().strip() or DEFAULT_VOICE,
             lang=self.ed_lang.text().strip() or "en",
-            model=DEFAULT_MODEL,
+            model=model,
             workers=workers,
             hsw_workers=hsw,
             speed=float(self.sb_speed.value()),
@@ -1649,8 +1690,8 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
         self._set_status(
-            f"Đang tạo {len(self._chunks)} đoạn · {workers} luồng TTS · "
-            f"{len(proxy_lines)} proxy · ~{total_chars:,} ký tự…"
+            f"Đang tạo {len(self._chunks)} đoạn · model {model} · "
+            f"{workers} luồng · {len(proxy_lines)} proxy · ~{total_chars:,} ký tự…"
         )
 
     def _stop(self):

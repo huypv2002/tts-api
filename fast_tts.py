@@ -750,6 +750,22 @@ def extract_audio_from_stream(text: str) -> bytes:
     return bytes(output)
 
 
+# Model hỗ trợ language_code (anonymous probe): v3 / turbo_v2_5 / flash_v2_5
+# multilingual_v2 + turbo_v2 + flash_v2: không gửi language_code (400 nếu ép vi)
+MODELS_WITH_LANGUAGE_CODE = frozenset(
+    {
+        "eleven_v3",
+        "eleven_turbo_v2_5",
+        "eleven_flash_v2_5",
+    }
+)
+
+
+def model_accepts_language_code(model_id: str) -> bool:
+    mid = (model_id or "").strip()
+    return mid in MODELS_WITH_LANGUAGE_CODE
+
+
 async def call_tts(
     text: str,
     hcaptcha_token: str,
@@ -762,20 +778,24 @@ async def call_tts(
     """POST anonymous stream endpoint (httpx, same proxy as token).
 
     Chỉ gửi speed — stability / similarity_boost để API dùng mặc định.
+    language_code chỉ gửi khi model hỗ trợ (tránh 400 trên multilingual_v2…).
     """
     t0 = time.time()
     url = f"{API_BASE}/v1/text-to-speech/{voice_id}/stream/with-timestamps/anonymous"
     # clamp speed like ElevenLabs client ranges
     speed = max(0.7, min(1.2, float(speed or 1.0)))
-    payload = {
+    mid = (model_id or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    payload: dict = {
         "text": text,
-        "model_id": model_id,
+        "model_id": mid,
         "voice_settings": {
             "speed": speed,
         },
         "hcaptcha_token": hcaptcha_token,
-        "language_code": language_code,
     }
+    lang = (language_code or "").strip()
+    if lang and model_accepts_language_code(mid):
+        payload["language_code"] = lang
 
     async with httpx.AsyncClient(
         proxy=proxy_http,
