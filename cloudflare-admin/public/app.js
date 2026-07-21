@@ -303,7 +303,9 @@ async function renderAccounts(root) {
     api("/packages"),
     api("/proxies"),
   ]);
-  const pkgOpts = (pkgs.packages || [])
+  const accountsList = acc.accounts || [];
+  const packagesList = pkgs.packages || [];
+  const pkgOpts = packagesList
     .map((p) => {
       const c = Number(p.chars);
       const lab =
@@ -326,34 +328,48 @@ async function renderAccounts(root) {
     .join("");
 
   root.innerHTML = `
-    <div class="panel">
-      <h3>Tạo account</h3>
-      <p class="muted">Gói ký tự · max luồng ≤ 5 · gắn proxy (proxyxoay.net hoặc proxyxoay.shop). Tool login nhận proxy <strong>mã hóa</strong>.</p>
+    <div class="panel" id="a-form-panel">
+      <h3 id="a-form-title">Tạo account</h3>
+      <p class="muted" id="a-form-hint">
+        Click 1 hàng account bên dưới để <strong>sửa</strong> (gói / luồng / max chars / mật khẩu).
+        Form trống = tạo mới.
+      </p>
+      <input type="hidden" id="a-edit-id" value="" />
       <div class="grid-2">
         <div class="field"><label>Username</label><input id="a-user" autocomplete="off" /></div>
-        <div class="field"><label>Password</label><input id="a-pass" type="password" autocomplete="new-password" /></div>
+        <div class="field">
+          <label>Password <span class="muted" id="a-pass-hint">(bắt buộc khi tạo)</span></label>
+          <input id="a-pass" type="password" autocomplete="new-password" placeholder="" />
+        </div>
         <div class="field">
           <label>Role</label>
           <select id="a-role"><option value="user">user</option><option value="admin">admin</option></select>
         </div>
         <div class="field">
           <label>Gói ký tự</label>
-          <select id="a-pkg"><option value="">—</option>${pkgOpts}</select>
+          <select id="a-pkg"><option value="">— chọn gói —</option>${pkgOpts}</select>
         </div>
         <div class="field"><label>Max luồng (1–5)</label><input id="a-mw" type="number" min="1" max="5" value="3" /></div>
         <div class="field"><label>Max chars/chunk (0=mặc định)</label><input id="a-mc" type="number" min="0" max="5000" value="0" /></div>
         <div class="field">
-          <label>Gắn proxy (net / shop)</label>
+          <label>Gắn proxy (chỉ khi tạo mới)</label>
           <select id="a-px"><option value="">— không gắn —</option>${pxOpts}</select>
         </div>
+        <div class="field">
+          <label>Enabled</label>
+          <select id="a-enabled"><option value="1">Bật</option><option value="0">Tắt</option></select>
+        </div>
       </div>
-      <div class="form-actions">
-        <button class="primary" type="button" id="a-create">Tạo account</button>
+      <div class="form-actions" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <button class="primary" type="button" id="a-save">Tạo account</button>
+        <button type="button" id="a-cancel" class="hidden">Hủy / form mới</button>
+        <button type="button" id="a-reset-used" class="hidden">Reset used</button>
+        <span class="muted" id="a-edit-label" style="font-size:12px"></span>
       </div>
       <div id="a-new" class="hidden" style="margin-top:1rem"></div>
     </div>
     <div class="panel">
-      <h3>Accounts</h3>
+      <h3>Accounts <span class="muted" style="font-weight:400;font-size:13px">— click hàng để edit form trên</span></h3>
       <table>
         <thead>
           <tr>
@@ -362,65 +378,37 @@ async function renderAccounts(root) {
           </tr>
         </thead>
         <tbody>
-          ${(acc.accounts || [])
+          ${accountsList
             .map((a) => {
               const proxies = a.proxies || [];
               const proxyListHtml = proxies.length > 0
                 ? proxies.map(p => `
-                  <div class="proxy-tag" style="display:flex;align-items:center;gap:4px;margin:2px 0">
-                    <span style="font-size:11px">${esc(p.priority)}. ${esc(p.label || p.proxy_id)} (${esc(p.provider.replace("proxyxoay_", ""))})</span>
-                    <button type="button" class="danger" style="padding:2px 6px;font-size:10px" data-act="remove-proxy" data-proxy-id="${esc(p.proxy_id)}">×</button>
+                  <div class="proxy-tag" style="display:flex;align-items:center;gap:4px;margin:2px 0" data-stop-row="1">
+                    <span style="font-size:11px">${esc(p.priority)}. ${esc(p.label || p.proxy_id)} (${esc((p.provider || "").replace("proxyxoay_", ""))})</span>
+                    <button type="button" class="danger" style="padding:2px 6px;font-size:10px" data-act="remove-proxy" data-proxy-id="${esc(p.proxy_id)}" data-stop-row="1">×</button>
                   </div>
                 `).join("")
                 : `<span class="muted" style="font-size:11px">chưa gắn proxy</span>`;
-              
-              const curPkg = a.package_id || "";
-              const pkgSelect = `
-                <select data-f="package_id" style="min-width:140px;max-width:200px" title="Đổi gói ký tự (quota theo gói)">
-                  <option value="">— giữ gói hiện tại —</option>
-                  ${(pkgs.packages || [])
-                    .map((p) => {
-                      const c = Number(p.chars);
-                      const lab =
-                        c <= 0 || c === -1
-                          ? `${esc(p.name)} (∞)`
-                          : `${esc(p.name)} (${fmtM(p.chars)})`;
-                      const sel = p.id === curPkg ? " selected" : "";
-                      return `<option value="${esc(p.id)}"${sel}>${lab}</option>`;
-                    })
-                    .join("")}
-                </select>
-                <div class="muted" style="font-size:11px;margin-top:2px">
-                  ${esc(a.package_name || "—")} · used ${
-                    Number(a.char_quota) <= 0 || a.unlimited
-                      ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
-                      : `${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}`
-                  }
-                </div>`;
               return `
-            <tr data-id="${esc(a.id)}">
-              <td>${esc(a.username)}</td>
+            <tr data-id="${esc(a.id)}" class="account-row" style="cursor:pointer" title="Click để sửa">
+              <td><strong>${esc(a.username)}</strong></td>
               <td>${badge(a.role || "user")}</td>
-              <td>${pkgSelect}</td>
+              <td>${esc(a.package_name || "—")}</td>
               <td>${
                 Number(a.char_quota) <= 0 || a.unlimited
                   ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
                   : `${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}`
               }</td>
-              <td>
-                <input type="number" min="1" max="5" value="${a.max_workers ?? 2}" data-f="max_workers" style="width:70px" />
-              </td>
-              <td>
-                <input type="number" min="0" max="5000" value="${a.max_chars ?? 0}" data-f="max_chars" style="width:80px" title="0 = studio default 300" />
-              </td>
-              <td>
+              <td>${a.max_workers ?? 2}</td>
+              <td>${a.max_chars ?? 0}</td>
+              <td data-stop-row="1">
                 ${proxyListHtml}
-                <button type="button" style="margin-top:4px;font-size:11px;padding:4px 8px" data-act="add-proxy">+ Thêm proxy</button>
+                <button type="button" style="margin-top:4px;font-size:11px;padding:4px 8px" data-act="add-proxy" data-stop-row="1">+ Thêm proxy</button>
               </td>
-              <td class="row" style="margin:0;flex-wrap:wrap;gap:4px">
-                <button type="button" data-act="save">Save</button>
-                <button type="button" data-act="reset">Reset used</button>
-                <button type="button" class="danger" data-act="del">Xóa</button>
+              <td class="row" style="margin:0;flex-wrap:wrap;gap:4px" data-stop-row="1">
+                <button type="button" data-act="edit" data-stop-row="1">Sửa</button>
+                <button type="button" data-act="reset" data-stop-row="1">Reset used</button>
+                <button type="button" class="danger" data-act="del" data-stop-row="1">Xóa</button>
               </td>
             </tr>`;
             })
@@ -430,7 +418,81 @@ async function renderAccounts(root) {
     </div>
   `;
 
-  $("#a-create").onclick = async () => {
+  const byId = Object.fromEntries(accountsList.map((a) => [a.id, a]));
+
+  function setCreateMode() {
+    $("#a-edit-id").value = "";
+    $("#a-form-title").textContent = "Tạo account";
+    $("#a-pass-hint").textContent = "(bắt buộc khi tạo)";
+    $("#a-pass").placeholder = "";
+    $("#a-user").value = "";
+    $("#a-user").disabled = false;
+    $("#a-pass").value = "";
+    $("#a-role").value = "user";
+    $("#a-pkg").value = "";
+    $("#a-mw").value = "3";
+    $("#a-mc").value = "0";
+    $("#a-px").value = "";
+    $("#a-px").disabled = false;
+    $("#a-enabled").value = "1";
+    $("#a-save").textContent = "Tạo account";
+    $("#a-cancel").classList.add("hidden");
+    $("#a-reset-used").classList.add("hidden");
+    $("#a-edit-label").textContent = "";
+    root.querySelectorAll("tr.account-row").forEach((r) => r.classList.remove("row-selected"));
+  }
+
+  function setEditMode(a) {
+    if (!a) return;
+    $("#a-edit-id").value = a.id || "";
+    $("#a-form-title").textContent = `Sửa account · ${a.username || ""}`;
+    $("#a-pass-hint").textContent = "(để trống = giữ mật khẩu cũ)";
+    $("#a-pass").placeholder = "••••••••";
+    $("#a-user").value = a.username || "";
+    $("#a-user").disabled = true; // username không đổi qua PATCH
+    $("#a-pass").value = "";
+    $("#a-role").value = a.role === "admin" ? "admin" : "user";
+    $("#a-pkg").value = a.package_id || "";
+    $("#a-mw").value = String(a.max_workers ?? 2);
+    $("#a-mc").value = String(a.max_chars ?? 0);
+    $("#a-px").value = "";
+    $("#a-px").disabled = true; // proxy gắn/gỡ ở cột bảng
+    $("#a-enabled").value = a.enabled === false || a.enabled === 0 ? "0" : "1";
+    $("#a-save").textContent = "Lưu thay đổi";
+    $("#a-cancel").classList.remove("hidden");
+    $("#a-reset-used").classList.remove("hidden");
+    const used =
+      Number(a.char_quota) <= 0 || a.unlimited
+        ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
+        : `${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}`;
+    $("#a-edit-label").textContent = `Đang sửa · used ${used}`;
+    root.querySelectorAll("tr.account-row").forEach((r) => {
+      r.classList.toggle("row-selected", r.dataset.id === a.id);
+    });
+    // scroll form into view
+    const panel = $("#a-form-panel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  $("#a-cancel").onclick = () => setCreateMode();
+
+  $("#a-reset-used").onclick = async () => {
+    const id = $("#a-edit-id").value;
+    if (!id) return;
+    try {
+      await api(`/accounts/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ chars_used: 0 }),
+      });
+      toast("Reset used");
+      navigate("accounts");
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+
+  $("#a-save").onclick = async () => {
+    const editId = ($("#a-edit-id").value || "").trim();
     try {
       let mw = +($("#a-mw").value || 3);
       if (mw < 1) mw = 1;
@@ -438,32 +500,63 @@ async function renderAccounts(root) {
       let mc = +($("#a-mc").value || 0);
       if (mc < 0) mc = 0;
       if (mc > 5000) mc = 5000;
+
+      if (!editId) {
+        // CREATE
+        const body = {
+          username: $("#a-user").value.trim(),
+          password: $("#a-pass").value,
+          role: $("#a-role").value,
+          package_id: $("#a-pkg").value,
+          max_workers: mw,
+          max_chars: mc,
+          proxy_id: $("#a-px").value,
+        };
+        if (!body.username || !body.password) {
+          toast("Cần username + password");
+          return;
+        }
+        const res = await api("/accounts", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const box = $("#a-new");
+        box.classList.remove("hidden");
+        box.style.display = "block";
+        const mcLabel = Number(res.max_chars) > 0 ? res.max_chars : "mặc định";
+        box.innerHTML = `<p class="muted">Account <strong>${esc(res.username)}</strong> · gói ${fmtM(res.char_quota)} · max ${res.max_workers} luồng · chunk ${esc(String(mcLabel))}</p>
+          <pre class="keybox">${esc(res.api_key || "")}</pre>
+          <p class="muted">Copy api_key ngay — chỉ hiện 1 lần</p>
+          <button type="button" id="a-copy">Copy key</button>`;
+        if (res.api_key) {
+          $("#a-copy").onclick = () => {
+            navigator.clipboard.writeText(res.api_key);
+            toast("Copied");
+          };
+        }
+        toast("Account created");
+        setTimeout(() => navigate("accounts"), 800);
+        return;
+      }
+
+      // UPDATE
       const body = {
-        username: $("#a-user").value.trim(),
-        password: $("#a-pass").value,
         role: $("#a-role").value,
-        package_id: $("#a-pkg").value,
         max_workers: mw,
         max_chars: mc,
-        proxy_id: $("#a-px").value,
+        enabled: $("#a-enabled").value === "1",
       };
-      const res = await api("/accounts", { method: "POST", body: JSON.stringify(body) });
-      const box = $("#a-new");
-      box.classList.remove("hidden");
-      box.style.display = "block";
-      const mcLabel = Number(res.max_chars) > 0 ? res.max_chars : "mặc định";
-      box.innerHTML = `<p class="muted">Account <strong>${esc(res.username)}</strong> · gói ${fmtM(res.char_quota)} · max ${res.max_workers} luồng · chunk ${esc(String(mcLabel))}</p>
-        <pre class="keybox">${esc(res.api_key || "")}</pre>
-        <p class="muted">Copy api_key ngay — chỉ hiện 1 lần</p>
-        <button type="button" id="a-copy">Copy key</button>`;
-      if (res.api_key) {
-        $("#a-copy").onclick = () => {
-          navigator.clipboard.writeText(res.api_key);
-          toast("Copied");
-        };
-      }
-      toast("Account created");
-      setTimeout(() => navigate("accounts"), 600);
+      const pkg = $("#a-pkg").value;
+      if (pkg) body.package_id = pkg;
+      const pw = $("#a-pass").value;
+      if (pw) body.password = pw;
+
+      await api(`/accounts/${editId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      toast("Đã lưu account (gói / luồng / max chars / …)");
+      navigate("accounts");
     } catch (e) {
       toast(e.message);
     }
@@ -471,39 +564,25 @@ async function renderAccounts(root) {
 
   root.querySelectorAll("tr[data-id]").forEach((tr) => {
     const id = tr.dataset.id;
-    const saveBtn = tr.querySelector('[data-act="save"]');
-    if (saveBtn)
-      saveBtn.onclick = async () => {
-        try {
-          let mw = +tr.querySelector('[data-f="max_workers"]').value || 2;
-          mw = Math.min(5, Math.max(1, mw));
-          const mcEl = tr.querySelector('[data-f="max_chars"]');
-          let mc = mcEl ? +mcEl.value : 0;
-          if (!Number.isFinite(mc) || mc < 0) mc = 0;
-          if (mc > 5000) mc = 5000;
-          const body = { max_workers: mw, max_chars: mc };
-          // Đổi gói ký tự (API cập nhật package_id + char_quota theo gói)
-          const pkgEl = tr.querySelector('[data-f="package_id"]');
-          if (pkgEl && pkgEl.value) {
-            body.package_id = pkgEl.value;
-          }
-          await api(`/accounts/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify(body),
-          });
-          toast(
-            body.package_id
-              ? "Saved (gói + luồng + max chars)"
-              : "Saved (luồng + max chars)"
-          );
-          navigate("accounts");
-        } catch (e) {
-          toast(e.message);
-        }
+    const account = byId[id];
+
+    // Click row → fill form trên
+    tr.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-stop-row]")) return;
+      setEditMode(account);
+    });
+
+    const editBtn = tr.querySelector('[data-act="edit"]');
+    if (editBtn)
+      editBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        setEditMode(account);
       };
+
     const resetBtn = tr.querySelector('[data-act="reset"]');
     if (resetBtn)
-      resetBtn.onclick = async () => {
+      resetBtn.onclick = async (ev) => {
+        ev.stopPropagation();
         try {
           await api(`/accounts/${id}`, {
             method: "PATCH",
@@ -517,7 +596,8 @@ async function renderAccounts(root) {
       };
     const delBtn = tr.querySelector('[data-act="del"]');
     if (delBtn)
-      delBtn.onclick = async () => {
+      delBtn.onclick = async (ev) => {
+        ev.stopPropagation();
         if (!confirm("Xóa account?")) return;
         try {
           await api(`/accounts/${id}`, { method: "DELETE" });
@@ -531,7 +611,8 @@ async function renderAccounts(root) {
     // Thêm proxy
     const addProxyBtn = tr.querySelector('[data-act="add-proxy"]');
     if (addProxyBtn)
-      addProxyBtn.onclick = async () => {
+      addProxyBtn.onclick = async (ev) => {
+        ev.stopPropagation();
         // Lấy danh sách proxies chưa gắn
         const pxsData = await api("/proxies");
         const allProxies = (pxsData.proxies || []).filter(p => p.enabled);
@@ -553,7 +634,7 @@ async function renderAccounts(root) {
         const modal = document.createElement("div");
         modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
         modal.innerHTML = `
-          <div style="background:white;padding:20px;border-radius:8px;min-width:300px">
+          <div style="background:var(--panel-solid,#121a2b);padding:20px;border-radius:8px;min-width:300px;border:1px solid var(--border)">
             <h4 style="margin:0 0 12px 0">Chọn proxy để gắn</h4>
             <select id="modal-proxy-select" style="width:100%;padding:8px;margin-bottom:12px">
               ${options}
@@ -582,10 +663,11 @@ async function renderAccounts(root) {
           }
         };
       };
-    
+
     // Xóa proxy
-    tr.querySelectorAll('[data-act="remove-proxy"]').forEach(btn => {
-      btn.onclick = async () => {
+    tr.querySelectorAll('[data-act="remove-proxy"]').forEach((btn) => {
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
         const proxyId = btn.dataset.proxyId;
         if (!confirm("Gỡ proxy này khỏi account?")) return;
         try {
