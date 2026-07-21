@@ -1,4 +1,3 @@
-/* tts-admin shell v3 */
 :root {
   --bg0: #070a12;
   --bg1: #0c1220;
@@ -126,6 +125,18 @@ label {
   margin-bottom: 0.4rem;
 }
 .field { margin-bottom: 0.95rem; }
+
+/* Accounts table: click row to edit form above */
+tr.account-row:hover {
+  background: rgba(107, 140, 255, 0.08);
+}
+tr.account-row.row-selected {
+  background: rgba(107, 140, 255, 0.16);
+  outline: 1px solid rgba(107, 140, 255, 0.35);
+}
+tr.account-row.row-selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 
 .glass {
   background: var(--panel);
