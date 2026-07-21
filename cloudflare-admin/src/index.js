@@ -645,14 +645,19 @@ async function handleApi(req, env) {
       }
     }
 
+    // 24 columns: 22 binds + chars_used=0 + created_at=datetime('now')
     await env.DB.prepare(
       `INSERT INTO accounts (
         id, username, password_salt, password_hash, role, enabled, note,
         package_id, package_name, char_quota, chars_used, max_workers, max_chars,
         proxy_id, proxy_provider, proxy_api_key, proxy_username, proxy_password,
         proxy_host, proxy_port, proxy_label, api_key_hash, api_key_prefix, created_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?,
-        ?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+      ) VALUES (
+        ?,?,?,?,?,?,?,?,?,?,
+        0,
+        ?,?,?,?,?,?,?,?,?,?,?,?,
+        datetime('now')
+      )`
     )
       .bind(
         id,
@@ -673,7 +678,7 @@ async function handleApi(req, env) {
         proxy_username,
         proxy_password,
         proxy_host,
-        proxy_port,
+        Number(proxy_port) || 0,
         proxy_label,
         api_key_hash,
         api_key_prefix
@@ -812,7 +817,18 @@ async function handleApi(req, env) {
         id
       )
       .run();
-    return json({ ok: true, id, proxy_id, proxy_provider, max_chars });
+    return json({
+      ok: true,
+      id,
+      proxy_id,
+      proxy_provider,
+      max_chars,
+      package_id,
+      package_name,
+      char_quota,
+      max_workers,
+      enabled: b.enabled === false ? 0 : b.enabled === true ? 1 : row.enabled,
+    });
   }
 
   if (path.startsWith("/accounts/") && method === "DELETE") {
@@ -960,7 +976,13 @@ async function serveAsset(req, env, assetPath) {
 
 function withNoStore(res, assetPath) {
   const headers = new Headers(res.headers);
-  if (assetPath.endsWith(".html") || assetPath.endsWith("/")) {
+  // Admin UI must never serve stale HTML/JS (edit form + create bugs were masked by cache)
+  if (
+    assetPath.endsWith(".html") ||
+    assetPath.endsWith("/") ||
+    assetPath.endsWith(".js") ||
+    assetPath.endsWith(".css")
+  ) {
     headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
     headers.set("Pragma", "no-cache");
   }

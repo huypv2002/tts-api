@@ -539,23 +539,26 @@ async function renderAccounts(root) {
         return;
       }
 
-      // UPDATE
+      // UPDATE — always send package_id so gói change is never skipped
       const body = {
         role: $("#a-role").value,
+        package_id: ($("#a-pkg").value || "").trim(),
         max_workers: mw,
         max_chars: mc,
         enabled: $("#a-enabled").value === "1",
       };
-      const pkg = $("#a-pkg").value;
-      if (pkg) body.package_id = pkg;
       const pw = $("#a-pass").value;
       if (pw) body.password = pw;
 
-      await api(`/accounts/${editId}`, {
+      const updated = await api(`/accounts/${editId}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
-      toast("Đã lưu account (gói / luồng / max chars / …)");
+      toast(
+        updated.package_name
+          ? `Đã lưu · gói ${updated.package_name} · ${mw} luồng`
+          : "Đã lưu account (gói / luồng / max chars / …)"
+      );
       navigate("accounts");
     } catch (e) {
       toast(e.message);
@@ -918,9 +921,9 @@ $$(".nav-btn[data-page]").forEach((b) => {
   }
 })();
 
-// build-5
-// 1783940529
-
-window.__TTS_ADMIN_BUILD="5";
+// build-9 — create SQL fixed + edit form
+window.__TTS_ADMIN_BUILD = "9";
 
 
+
+// deploy-force 20260721162529
