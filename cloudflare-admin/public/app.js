@@ -374,11 +374,34 @@ async function renderAccounts(root) {
                 `).join("")
                 : `<span class="muted" style="font-size:11px">chưa gắn proxy</span>`;
               
+              const curPkg = a.package_id || "";
+              const pkgSelect = `
+                <select data-f="package_id" style="min-width:140px;max-width:200px" title="Đổi gói ký tự (quota theo gói)">
+                  <option value="">— giữ gói hiện tại —</option>
+                  ${(pkgs.packages || [])
+                    .map((p) => {
+                      const c = Number(p.chars);
+                      const lab =
+                        c <= 0 || c === -1
+                          ? `${esc(p.name)} (∞)`
+                          : `${esc(p.name)} (${fmtM(p.chars)})`;
+                      const sel = p.id === curPkg ? " selected" : "";
+                      return `<option value="${esc(p.id)}"${sel}>${lab}</option>`;
+                    })
+                    .join("")}
+                </select>
+                <div class="muted" style="font-size:11px;margin-top:2px">
+                  ${esc(a.package_name || "—")} · used ${
+                    Number(a.char_quota) <= 0 || a.unlimited
+                      ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
+                      : `${fmtM(a.chars_used)} / ${fmtM(a.char_quota)}`
+                  }
+                </div>`;
               return `
             <tr data-id="${esc(a.id)}">
               <td>${esc(a.username)}</td>
               <td>${badge(a.role || "user")}</td>
-              <td>${esc(a.package_name || "—")}</td>
+              <td>${pkgSelect}</td>
               <td>${
                 Number(a.char_quota) <= 0 || a.unlimited
                   ? `${Number(a.chars_used || 0).toLocaleString()} / ∞`
@@ -458,11 +481,21 @@ async function renderAccounts(root) {
           let mc = mcEl ? +mcEl.value : 0;
           if (!Number.isFinite(mc) || mc < 0) mc = 0;
           if (mc > 5000) mc = 5000;
+          const body = { max_workers: mw, max_chars: mc };
+          // Đổi gói ký tự (API cập nhật package_id + char_quota theo gói)
+          const pkgEl = tr.querySelector('[data-f="package_id"]');
+          if (pkgEl && pkgEl.value) {
+            body.package_id = pkgEl.value;
+          }
           await api(`/accounts/${id}`, {
             method: "PATCH",
-            body: JSON.stringify({ max_workers: mw, max_chars: mc }),
+            body: JSON.stringify(body),
           });
-          toast("Saved (luồng + max chars)");
+          toast(
+            body.package_id
+              ? "Saved (gói + luồng + max chars)"
+              : "Saved (luồng + max chars)"
+          );
           navigate("accounts");
         } catch (e) {
           toast(e.message);
