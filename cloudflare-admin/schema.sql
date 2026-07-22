@@ -79,6 +79,36 @@ CREATE TABLE IF NOT EXISTS account_proxies (
 CREATE INDEX IF NOT EXISTS idx_account_proxies_account ON account_proxies(account_id);
 CREATE INDEX IF NOT EXISTS idx_account_proxies_proxy ON account_proxies(proxy_id);
 
+-- Studio presence: online = user đang gen TTS (heartbeat)
+CREATE TABLE IF NOT EXISTS presence_tokens (
+  token TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  username TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  expires_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_presence_tokens_acc ON presence_tokens(account_id);
+
+CREATE TABLE IF NOT EXISTS gen_online (
+  account_id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  session_id TEXT DEFAULT '',
+  kind TEXT DEFAULT 'preview',
+  workers INTEGER DEFAULT 1,
+  ok_chunks INTEGER DEFAULT 0,
+  fail_chunks INTEGER DEFAULT 0,
+  total_chunks INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'generating',
+  label TEXT DEFAULT '',
+  started_at TEXT,
+  last_seen REAL NOT NULL,
+  client TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_gen_online_seen ON gen_online(last_seen);
+CREATE INDEX IF NOT EXISTS idx_gen_online_status ON gen_online(status);
+
 -- seed packages
 INSERT OR IGNORE INTO packages (id, name, chars, note, created_at) VALUES
   ('pkg_1m',  'Gói 1 triệu',  1000000,  '1M chars', datetime('now')),

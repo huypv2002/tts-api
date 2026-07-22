@@ -12,6 +12,9 @@
  * Routes:
  *   POST /api/login  (or /admin/api/login)
  *   POST /api/logout
+ *   POST /api/user/login
+ *   POST /api/user/presence   (studio: start|heartbeat|stop gen)
+ *   GET  /api/online         (admin: ai đang gen)
  *   GET  /api/dashboard
  *   CRUD /api/accounts
  *   CRUD /api/proxies
@@ -21,6 +24,9 @@
 
 const COOKIE = "tts_cf_admin";
 const COOKIE_TTL = 60 * 60 * 24 * 7;
+/** Seconds without heartbeat → no longer "online gen" */
+const GEN_ONLINE_TTL = 120;
+const PRESENCE_TOKEN_TTL = 60 * 60 * 24 * 30;
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
@@ -228,10 +234,77 @@ function apiPathFromUrl(pathname) {
   return p;
 }
 
+let _presenceSchemaReady = false;
+
+async function ensurePresenceSchema(env) {
+  if (!env.DB) return;
+  if (_presenceSchemaReady) return;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS presence_tokens (
+          token TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          username TEXT DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at REAL NOT NULL
+        )`
+      ),
+      env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_presence_tokens_acc ON presence_tokens(account_id)`
+      ),
+      env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS gen_online (
+          account_id TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          session_id TEXT DEFAULT '',
+          kind TEXT DEFAULT 'preview',
+          workers INTEGER DEFAULT 1,
+          ok_chunks INTEGER DEFAULT 0,
+          fail_chunks INTEGER DEFAULT 0,
+          total_chunks INTEGER DEFAULT 0,
+          status TEXT DEFAULT 'generating',
+          label TEXT DEFAULT '',
+          started_at TEXT,
+          last_seen REAL NOT NULL,
+          client TEXT DEFAULT ''
+        )`
+      ),
+      env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_gen_online_seen ON gen_online(last_seen)`
+      ),
+      env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_gen_online_status ON gen_online(status)`
+      ),
+    ]);
+    _presenceSchemaReady = true;
+  } catch (e) {
+    // table may already exist partially — keep serving
+    console.log("ensurePresenceSchema", String(e && e.message ? e.message : e));
+  }
+}
+
+async function countOnlineGen(env) {
+  const cutoff = Date.now() / 1000 - GEN_ONLINE_TTL;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM gen_online
+       WHERE status = 'generating' AND last_seen >= ?`
+    )
+      .bind(cutoff)
+      .first();
+    return Number(row?.c || 0);
+  } catch {
+    return 0;
+  }
+}
+
 async function handleApi(req, env) {
   const url = new URL(req.url);
   const path = apiPathFromUrl(url.pathname);
   const method = req.method.toUpperCase();
+
+  await ensurePresenceSchema(env);
 
   // ── login (no auth) ──
   if (path === "/login" && method === "POST") {
@@ -315,6 +388,25 @@ async function handleApi(req, env) {
       .bind(row.id)
       .run();
 
+    // presence token for studio gen online heartbeats
+    const presence_token =
+      crypto.randomUUID().replace(/-/g, "") +
+      crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const presence_exp = Date.now() / 1000 + PRESENCE_TOKEN_TTL;
+    try {
+      await env.DB.prepare("DELETE FROM presence_tokens WHERE account_id = ?")
+        .bind(row.id)
+        .run();
+      await env.DB.prepare(
+        `INSERT INTO presence_tokens (token, account_id, username, created_at, expires_at)
+         VALUES (?, ?, ?, datetime('now'), ?)`
+      )
+        .bind(presence_token, row.id, row.username, presence_exp)
+        .run();
+    } catch (e) {
+      console.log("presence_token insert", String(e && e.message ? e.message : e));
+    }
+
     // Encrypt all proxies for tool; do not send plain secrets over the wire
     let proxies_sealed = "";
     if (proxiesList.length > 0) {
@@ -329,6 +421,7 @@ async function handleApi(req, env) {
       ok: true,
       source: "cloudflare-d1",
       seal_version: 1,
+      presence_token,
       account: {
         id: row.id,
         username: row.username,
@@ -353,6 +446,7 @@ async function handleApi(req, env) {
         has_proxy: proxiesList.length > 0,
         proxies_sealed,
         proxies_count: proxiesList.length,
+        presence_token,
         // password material so local tool can cache offline login
         password_salt: row.password_salt,
         password_hash: row.password_hash,
@@ -360,9 +454,201 @@ async function handleApi(req, env) {
     });
   }
 
+  // ── Studio: gen presence (online = đang gen TTS) ──
+  // POST /user/presence  { token|presence_token, action, kind, workers, ok, fail, total, label, session_id }
+  if (
+    (path === "/user/presence" ||
+      path === "/presence/heartbeat" ||
+      path === "/gen/presence") &&
+    method === "POST"
+  ) {
+    const b = await req.json().catch(() => ({}));
+    const token = String(
+      b.token || b.presence_token || req.headers.get("X-Presence-Token") || ""
+    ).trim();
+    if (!token) return err("presence token required", 401);
+
+    const tok = await env.DB.prepare(
+      "SELECT * FROM presence_tokens WHERE token = ?"
+    )
+      .bind(token)
+      .first();
+    if (!tok) return err("invalid presence token", 401);
+    if (Number(tok.expires_at) < Date.now() / 1000) {
+      await env.DB.prepare("DELETE FROM presence_tokens WHERE token = ?")
+        .bind(token)
+        .run();
+      return err("presence token expired — login again", 401);
+    }
+
+    const account = await env.DB.prepare(
+      "SELECT id, username, enabled FROM accounts WHERE id = ?"
+    )
+      .bind(tok.account_id)
+      .first();
+    if (!account || !account.enabled) return err("account disabled", 403);
+
+    const action = String(b.action || "heartbeat").toLowerCase();
+    const now = Date.now() / 1000;
+    const kind = String(b.kind || "preview").slice(0, 32);
+    const workers = Math.min(5, Math.max(0, Number(b.workers) || 0));
+    const ok_chunks = Math.max(0, Number(b.ok != null ? b.ok : b.ok_chunks) || 0);
+    const fail_chunks = Math.max(
+      0,
+      Number(b.fail != null ? b.fail : b.fail_chunks) || 0
+    );
+    const total_chunks = Math.max(
+      0,
+      Number(b.total != null ? b.total : b.total_chunks) || 0
+    );
+    const label = String(b.label || "").slice(0, 120);
+    const session_id = String(b.session_id || "").slice(0, 64);
+    const client = String(b.client || "preview_studio").slice(0, 64);
+
+    if (action === "stop" || action === "end" || action === "idle") {
+      await env.DB.prepare(
+        `UPDATE gen_online SET
+           status='idle', last_seen=?, ok_chunks=?, fail_chunks=?, total_chunks=?
+         WHERE account_id=?`
+      )
+        .bind(now, ok_chunks, fail_chunks, total_chunks, account.id)
+        .run();
+      return json({ ok: true, status: "idle", online: false });
+    }
+
+    // start | heartbeat | generating
+    const existing = await env.DB.prepare(
+      "SELECT started_at, session_id FROM gen_online WHERE account_id = ?"
+    )
+      .bind(account.id)
+      .first();
+    const isStart = action === "start" || action === "begin";
+    const started_at =
+      isStart || !existing?.started_at
+        ? new Date().toISOString()
+        : existing.started_at;
+    const sid =
+      session_id ||
+      (isStart ? crypto.randomUUID().replace(/-/g, "").slice(0, 16) : "") ||
+      existing?.session_id ||
+      "";
+
+    await env.DB.prepare(
+      `INSERT INTO gen_online (
+         account_id, username, session_id, kind, workers,
+         ok_chunks, fail_chunks, total_chunks, status, label,
+         started_at, last_seen, client
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(account_id) DO UPDATE SET
+         username=excluded.username,
+         session_id=CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE gen_online.session_id END,
+         kind=excluded.kind,
+         workers=excluded.workers,
+         ok_chunks=excluded.ok_chunks,
+         fail_chunks=excluded.fail_chunks,
+         total_chunks=excluded.total_chunks,
+         status='generating',
+         label=CASE WHEN excluded.label != '' THEN excluded.label ELSE gen_online.label END,
+         started_at=excluded.started_at,
+         last_seen=excluded.last_seen,
+         client=excluded.client`
+    )
+      .bind(
+        account.id,
+        account.username,
+        sid,
+        kind,
+        workers,
+        ok_chunks,
+        fail_chunks,
+        total_chunks,
+        "generating",
+        label,
+        started_at,
+        now,
+        client
+      )
+      .run();
+
+    return json({
+      ok: true,
+      status: "generating",
+      online: true,
+      account_id: account.id,
+      username: account.username,
+      ttl: GEN_ONLINE_TTL,
+    });
+  }
+
   // all below need admin
   const session = await requireAdmin(env, req);
   if (!session) return err("admin auth required", 401);
+
+  // ── online gen observers ──
+  if ((path === "/online" || path === "/presence") && method === "GET") {
+    const cutoff = Date.now() / 1000 - GEN_ONLINE_TTL;
+    // expire stale rows to idle (best-effort)
+    try {
+      await env.DB.prepare(
+        `UPDATE gen_online SET status='idle'
+         WHERE status='generating' AND last_seen < ?`
+      )
+        .bind(cutoff)
+        .run();
+    } catch (_) {}
+
+    const r = await env.DB.prepare(
+      `SELECT account_id, username, session_id, kind, workers,
+              ok_chunks, fail_chunks, total_chunks, status, label,
+              started_at, last_seen, client
+       FROM gen_online
+       WHERE status = 'generating' AND last_seen >= ?
+       ORDER BY last_seen DESC
+       LIMIT 200`
+    )
+      .bind(cutoff)
+      .all();
+
+    const now = Date.now() / 1000;
+    const online = (r.results || []).map((row) => {
+      const total = Number(row.total_chunks) || 0;
+      const ok = Number(row.ok_chunks) || 0;
+      const fail = Number(row.fail_chunks) || 0;
+      const done = ok + fail;
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+      const age = Math.max(0, Math.round(now - Number(row.last_seen || 0)));
+      let duration_s = null;
+      if (row.started_at) {
+        const t0 = Date.parse(row.started_at);
+        if (!Number.isNaN(t0)) duration_s = Math.max(0, Math.round(now * 1000 - t0) / 1000);
+      }
+      return {
+        account_id: row.account_id,
+        username: row.username,
+        session_id: row.session_id || "",
+        kind: row.kind || "preview",
+        workers: Number(row.workers) || 0,
+        ok_chunks: ok,
+        fail_chunks: fail,
+        total_chunks: total,
+        progress_pct: pct,
+        label: row.label || "",
+        started_at: row.started_at || "",
+        last_seen: Number(row.last_seen) || 0,
+        last_seen_ago_s: age,
+        duration_s: duration_s != null ? Math.round(duration_s) : null,
+        client: row.client || "",
+        status: "generating",
+      };
+    });
+
+    return json({
+      online,
+      count: online.length,
+      ttl: GEN_ONLINE_TTL,
+      now: Date.now() / 1000,
+    });
+  }
 
   // ── dashboard ──
   if (path === "/dashboard" && method === "GET") {
@@ -384,12 +670,15 @@ async function handleApi(req, env) {
     const accCount = accounts?.c || 0;
     const pxReady = proxies?.c || 0;
     const pxTotal = proxiesAll?.c || 0;
+    const online_gen = await countOnlineGen(env);
     // Shape compatible with both CF UI and legacy Windows admin JS
     // (old code did d.usage.jobs_by_status without null-check)
     return json({
       accounts: accCount,
       keys_count: accCount,
       proxies_ready: pxReady,
+      online_gen,
+      online: online_gen,
       packages: packages.results || [],
       usage: { jobs_by_status: {}, by_day: [] },
       proxy: { ready: pxReady, total: pxTotal },
@@ -574,8 +863,40 @@ async function handleApi(req, env) {
         };
       })
     );
-    
-    return json({ accounts: accountsWithProxies });
+
+    // attach online-gen flags (TTL window)
+    const cutoff = Date.now() / 1000 - GEN_ONLINE_TTL;
+    let onlineMap = {};
+    try {
+      const on = await env.DB.prepare(
+        `SELECT account_id, kind, workers, ok_chunks, fail_chunks, total_chunks, last_seen
+         FROM gen_online WHERE status='generating' AND last_seen >= ?`
+      )
+        .bind(cutoff)
+        .all();
+      for (const row of on.results || []) {
+        onlineMap[row.account_id] = row;
+      }
+    } catch (_) {}
+
+    const accountsOut = accountsWithProxies.map((a) => {
+      const o = onlineMap[a.id];
+      if (!o) return { ...a, online: false, gen_online: null };
+      return {
+        ...a,
+        online: true,
+        gen_online: {
+          kind: o.kind,
+          workers: o.workers,
+          ok_chunks: o.ok_chunks,
+          fail_chunks: o.fail_chunks,
+          total_chunks: o.total_chunks,
+          last_seen: o.last_seen,
+        },
+      };
+    });
+
+    return json({ accounts: accountsOut });
   }
 
   if (path === "/accounts" && method === "POST") {

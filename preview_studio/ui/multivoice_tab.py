@@ -1275,6 +1275,27 @@ class MultivoiceTab(QtWidgets.QWidget):
         self._worker.finished_ok.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+        import time as _time
+        import uuid as _uuid
+
+        self._gen_session_id = _uuid.uuid4().hex[:16]
+        self._gen_ok = 0
+        self._gen_fail = 0
+        self._gen_total = n_turns
+        self._gen_workers = n_workers
+        self._presence_last = 0.0
+        try:
+            accounts.report_gen_start(
+                self.user,
+                kind="multivoice",
+                workers=n_workers,
+                total=n_turns,
+                label=f"multivoice · {n_turns} lượt",
+                session_id=self._gen_session_id,
+            )
+            self._presence_last = _time.time()
+        except Exception:
+            pass
         labels = ", ".join(
             (p.get("label") or p.get("id") or "?") for p in proxy_lines[:3]
         )
@@ -1321,12 +1342,42 @@ class MultivoiceTab(QtWidgets.QWidget):
     def _on_progress(self, cur: int, total: int):
         self.progress.setValue(int(100 * cur / max(1, total)))
         self.lbl_result.setText(f"{cur}/{total}")
+        self._gen_ok = int(cur or 0)
+        self._gen_total = int(total or getattr(self, "_gen_total", 0) or 0)
+        try:
+            import time as _time
+
+            now = _time.time()
+            if now - float(getattr(self, "_presence_last", 0) or 0) >= 20:
+                self._presence_last = now
+                accounts.report_gen_heartbeat(
+                    self.user,
+                    kind="multivoice",
+                    workers=int(getattr(self, "_gen_workers", 0) or 0),
+                    ok=int(cur or 0),
+                    fail=int(getattr(self, "_gen_fail", 0) or 0),
+                    total=int(total or 0),
+                    session_id=str(getattr(self, "_gen_session_id", "") or ""),
+                )
+        except Exception:
+            pass
 
     def _on_finished(self, ok: int, fail: int, merged: str):
         self.bt_start.setEnabled(True)
         self.bt_stop.setEnabled(False)
         self.progress.setValue(100 if ok else self.progress.value())
         self.lbl_result.setText(f"Xong: {ok} OK / {fail} lỗi")
+        try:
+            accounts.report_gen_stop(
+                self.user,
+                kind="multivoice",
+                ok=int(ok or 0),
+                fail=int(fail or 0),
+                total=int(getattr(self, "_gen_total", 0) or 0),
+                session_id=str(getattr(self, "_gen_session_id", "") or ""),
+            )
+        except Exception:
+            pass
         try:
             n = sum(len(t.get("text") or "") for t in self._turns)
             # charge successful-ish total script length proportionally
@@ -1355,6 +1406,17 @@ class MultivoiceTab(QtWidgets.QWidget):
         self.bt_start.setEnabled(True)
         self.bt_stop.setEnabled(False)
         self._set_status(f"Lỗi: {err[:200]}")
+        try:
+            accounts.report_gen_stop(
+                self.user,
+                kind="multivoice",
+                ok=int(getattr(self, "_gen_ok", 0) or 0),
+                fail=int(getattr(self, "_gen_fail", 0) or 0) + 1,
+                total=int(getattr(self, "_gen_total", 0) or 0),
+                session_id=str(getattr(self, "_gen_session_id", "") or ""),
+            )
+        except Exception:
+            pass
         QtWidgets.QMessageBox.critical(self, "Lỗi", err[:800])
 
     def _open_out(self):

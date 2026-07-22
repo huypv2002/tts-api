@@ -482,12 +482,16 @@ def _upsert_remote_account(account: dict, password: str) -> dict:
         "proxies": proxies_list,  # Store full proxies list
         "has_proxy": len(proxies_list) > 0,
         "source": "cloudflare-d1",
+        "presence_token": account.get("presence_token") or "",
     }
 
     found = False
     for i, a in enumerate(accounts):
         if a.get("username") == row["username"] or a.get("id") == uid:
             # keep local chars_used if higher? prefer remote
+            # keep previous presence_token if server omitted it
+            if not row.get("presence_token") and a.get("presence_token"):
+                row["presence_token"] = a.get("presence_token")
             accounts[i] = {**a, **row}
             row = accounts[i]
             found = True
@@ -548,7 +552,12 @@ def authenticate_remote(username: str, password: str) -> Optional[dict]:
             continue
 
         if data.get("ok") and data.get("account"):
-            return _upsert_remote_account(data["account"], password)
+            acc = data["account"]
+            # top-level or nested presence token for gen-online heartbeats
+            pt = data.get("presence_token") or acc.get("presence_token") or ""
+            if pt:
+                acc = {**acc, "presence_token": pt}
+            return _upsert_remote_account(acc, password)
 
     if wrong_password:
         return None
@@ -674,6 +683,159 @@ def consume_chars(account_id: str, n: int) -> tuple[bool, str]:
         _save(data)
         return True, "ok"
     return False, "Không tìm thấy tài khoản"
+
+
+# ── Gen presence (online = đang gen TTS) → CF admin ─────────────────────────
+
+def _presence_token_for(account: Optional[dict]) -> str:
+    if not account:
+        return ""
+    tok = (account.get("presence_token") or "").strip()
+    if tok:
+        return tok
+    uid = account.get("id") or ""
+    if not uid:
+        return ""
+    full = get_account(str(uid))
+    return ((full or {}).get("presence_token") or "").strip()
+
+
+def report_gen_presence(
+    account: Optional[dict],
+    action: str = "heartbeat",
+    *,
+    kind: str = "preview",
+    workers: int = 0,
+    ok: int = 0,
+    fail: int = 0,
+    total: int = 0,
+    label: str = "",
+    session_id: str = "",
+    blocking: bool = False,
+) -> bool:
+    """
+    Báo admin: user đang gen / heartbeat / stop.
+    Fire-and-forget by default (không chặn pipeline TTS).
+    """
+    token = _presence_token_for(account)
+    if not token:
+        return False
+
+    payload = {
+        "token": token,
+        "action": str(action or "heartbeat"),
+        "kind": str(kind or "preview")[:32],
+        "workers": max(0, int(workers or 0)),
+        "ok": max(0, int(ok or 0)),
+        "fail": max(0, int(fail or 0)),
+        "total": max(0, int(total or 0)),
+        "label": str(label or "")[:120],
+        "session_id": str(session_id or "")[:64],
+        "client": "preview_studio",
+    }
+
+    def _send() -> bool:
+        import urllib.request
+
+        body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "curl/8.7.1",
+            "X-Presence-Token": token,
+        }
+        for base in AUTH_API_BASES:
+            url = f"{base}/user/presence"
+            req = urllib.request.Request(
+                url, data=body, headers=headers, method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = json.loads(resp.read().decode("utf-8") or "{}")
+                return bool(data.get("ok"))
+            except Exception:
+                continue
+        return False
+
+    if blocking:
+        try:
+            return _send()
+        except Exception:
+            return False
+
+    try:
+        import threading
+
+        threading.Thread(target=_send, name="gen-presence", daemon=True).start()
+        return True
+    except Exception:
+        return False
+
+
+def report_gen_start(
+    account: Optional[dict],
+    *,
+    kind: str = "preview",
+    workers: int = 1,
+    total: int = 0,
+    label: str = "",
+    session_id: str = "",
+) -> bool:
+    return report_gen_presence(
+        account,
+        "start",
+        kind=kind,
+        workers=workers,
+        ok=0,
+        fail=0,
+        total=total,
+        label=label,
+        session_id=session_id,
+    )
+
+
+def report_gen_heartbeat(
+    account: Optional[dict],
+    *,
+    kind: str = "preview",
+    workers: int = 0,
+    ok: int = 0,
+    fail: int = 0,
+    total: int = 0,
+    label: str = "",
+    session_id: str = "",
+) -> bool:
+    return report_gen_presence(
+        account,
+        "heartbeat",
+        kind=kind,
+        workers=workers,
+        ok=ok,
+        fail=fail,
+        total=total,
+        label=label,
+        session_id=session_id,
+    )
+
+
+def report_gen_stop(
+    account: Optional[dict],
+    *,
+    kind: str = "preview",
+    ok: int = 0,
+    fail: int = 0,
+    total: int = 0,
+    session_id: str = "",
+) -> bool:
+    return report_gen_presence(
+        account,
+        "stop",
+        kind=kind,
+        ok=ok,
+        fail=fail,
+        total=total,
+        session_id=session_id,
+    )
 
 
 def check_chars(account: dict, n: int) -> tuple[bool, str]:

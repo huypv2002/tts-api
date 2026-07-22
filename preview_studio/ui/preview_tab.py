@@ -310,20 +310,24 @@ class BatchWorker(QThread):
     def stop(self):
         self._stop = True
 
+    @staticmethod
+    def _good_mp3(path: str) -> bool:
+        try:
+            return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 500
+        except Exception:
+            return False
+
     def run(self):
-        """Pipeline: multi-lane TTS + output layout v327 (doan_N + merge)."""
+        """Pipeline: multi-lane TTS + outer requeue + merge chỉ khi ĐỦ đoạn."""
         import asyncio
 
         os.makedirs(self.output_dir, exist_ok=True)
-        done_n = 0
         done_lock = threading.Lock()
+        done_n = 0
 
-        # per-file: track remaining chunks → merge when 0
-        file_pending: dict[str, int] = {}
         file_meta: dict[str, dict] = {}
         for ch in self.chunks:
             fn = ch.get("file") or "doan.txt"
-            file_pending[fn] = file_pending.get(fn, 0) + 1
             if fn not in file_meta:
                 file_meta[fn] = {
                     "file_dir": ch.get("file_dir")
@@ -337,7 +341,8 @@ class BatchWorker(QThread):
                     "total_parts": int(ch.get("total_parts") or 0),
                 }
 
-        jobs = []
+        # Flatten jobs (row = index in self.chunks)
+        all_jobs: list[dict] = []
         for i, ch in enumerate(self.chunks):
             text = ch.get("text") or ""
             fname = ch.get("file") or "doan.txt"
@@ -345,15 +350,18 @@ class BatchWorker(QThread):
             out = ch.get("out_path") or doan_path(self.output_dir, fname, part)
             Path(out).parent.mkdir(parents=True, exist_ok=True)
             ch["out_path"] = out
-            jobs.append({
-                "row": i,
-                "text": text,
-                "out_path": out,
-                "file": fname,
-                "part": part,
-            })
-        
+            all_jobs.append(
+                {
+                    "row": i,
+                    "text": text,
+                    "out_path": out,
+                    "file": fname,
+                    "part": part,
+                }
+            )
+
         total = len(self.chunks)
+        OUTER_ROUNDS = 4  # re-queue đoạn thiếu (tránh file tổng ngắn)
 
         def on_start(row: int):
             if self._stop:
@@ -373,23 +381,52 @@ class BatchWorker(QThread):
         def on_status(row: int, status: str):
             self.row_status.emit(row, status)
 
-        def try_merge_file(fname: str):
+        def file_complete(fname: str) -> tuple[bool, int, int, list[str]]:
+            """(đủ hết, n_ok, n_total, missing_labels)."""
+            leaves = [c for c in self.chunks if (c.get("file") or "") == fname]
+            ok_n = 0
+            missing: list[str] = []
+            for c in leaves:
+                p = c.get("out_path") or c.get("path") or ""
+                if self._good_mp3(p):
+                    ok_n += 1
+                else:
+                    para = c.get("para_idx")
+                    sub = c.get("sub_idx")
+                    if para is not None and int(c.get("total_subs") or 1) > 1:
+                        missing.append(f"doan_{para}_{sub}")
+                    elif para is not None:
+                        missing.append(f"doan_{para}")
+                    else:
+                        missing.append(f"part_{c.get('part') or '?'}")
+            return ok_n == len(leaves) and len(leaves) > 0, ok_n, len(leaves), missing
+
+        def try_merge_file(fname: str, *, force_log: bool = True) -> bool:
             meta = file_meta.get(fname) or {}
             mout = meta.get("merged_path") or ""
             if not mout:
-                return
-            leaves = [
-                c
-                for c in self.chunks
-                if (c.get("file") or "") == fname
-            ]
+                return False
+            complete, ok_n, n_tot, missing = file_complete(fname)
+            if not complete:
+                if force_log:
+                    miss_s = ", ".join(missing[:8])
+                    if len(missing) > 8:
+                        miss_s += f" …(+{len(missing)-8})"
+                    self.log.emit(
+                        f"⚠ {fname}: chỉ có {ok_n}/{n_tot} đoạn trên disk — "
+                        f"KHÔNG merge (thiếu sẽ làm file ngắn/sai nội dung). "
+                        f"Thiếu: {miss_s or '?'}"
+                    )
+                return False
+            leaves = [c for c in self.chunks if (c.get("file") or "") == fname]
             ok_m, msg = merge_file_from_chunks(
                 leaves, mout, advanced=self.advanced
             )
             if ok_m:
-                self.log.emit(f"📦 {fname}: {msg}")
+                self.log.emit(f"📦 {fname}: {msg} · đủ {ok_n}/{n_tot} đoạn")
             else:
                 self.log.emit(f"⚠ Merge {fname}: {msg}")
+            return ok_m
 
         def on_done(row: int, success: bool, path: str, err: str):
             nonlocal done_n
@@ -411,56 +448,108 @@ class BatchWorker(QThread):
                 self.log.emit(
                     f"✅ {fname} doan_{ch.get('part') or row+1} → {rel}"
                 )
-                # merge when last chunk of this file finishes
-                if fname in file_pending:
-                    file_pending[fname] = max(0, file_pending[fname] - 1)
-                    if file_pending[fname] == 0:
-                        try_merge_file(fname)
             else:
-                self.row_status.emit(row, "Lỗi")
+                self.row_status.emit(row, "Chờ thử lại…" if not self._stop else "Lỗi")
                 self.row_done.emit(row, False, "", err)
                 self.log.emit(
                     f"❌ {fname} doan_{ch.get('part') or row+1}: {err}"
                 )
-                if fname in file_pending:
-                    file_pending[fname] = max(0, file_pending[fname] - 1)
-            self.file_progress.emit(0, cur, total)
+            # progress theo file thật trên disk
+            disk_ok = sum(
+                1
+                for c in self.chunks
+                if self._good_mp3(c.get("out_path") or c.get("path") or "")
+            )
+            self.file_progress.emit(0, disk_ok, total)
 
         try:
-            # workers = admin max_workers: 1 proxy + 3 workers → 3 TTS song song
             n_workers = max(1, min(5, int(self.workers or 1)))
-            ok, fail = asyncio.run(
-                run_jobs(
-                    jobs,
-                    proxy_url=self.proxy or "",
-                    proxy_api_key=self.proxy_api_key,
-                    proxy_lines=self.proxy_lines or None,
-                    voice=self.voice,
-                    model=self.model,
-                    lang=self.lang,
-                    speed=self.speed,
-                    hsw_workers=self.hsw_workers,
-                    workers=n_workers,
-                    tokens_per_lane=max(3, n_workers),
-                    max_attempts=40,
-                    should_stop=lambda: self._stop,
-                    on_start=on_start,
-                    on_status=on_status,
-                    on_done=on_done,
-                )
-            )
-            # safety: merge any file that still has all doan_* on disk
-            for fn, left in list(file_pending.items()):
-                if left == 0:
-                    continue
-                meta = file_meta.get(fn) or {}
-                fdir = meta.get("file_dir") or ""
-                total_p = int(meta.get("total_parts") or 0)
-                if fdir and total_p > 0:
-                    from output_layout import list_doan_files
+            ok = fail = 0
 
-                    if len(list_doan_files(fdir)) >= total_p:
-                        try_merge_file(fn)
+            async def _run_all():
+                nonlocal ok, fail, done_n
+                for outer in range(1, OUTER_ROUNDS + 1):
+                    if self._stop:
+                        break
+                    pending = [
+                        dict(j)
+                        for j in all_jobs
+                        if not self._good_mp3(j.get("out_path") or "")
+                    ]
+                    # purge tiny broken files
+                    for j in pending:
+                        p = j.get("out_path") or ""
+                        try:
+                            if p and os.path.isfile(p) and os.path.getsize(p) <= 500:
+                                os.remove(p)
+                        except Exception:
+                            pass
+                    if not pending:
+                        self.log.emit("Tất cả đoạn đã có audio trên disk.")
+                        break
+                    self.log.emit(
+                        f"── Vòng {outer}/{OUTER_ROUNDS}: "
+                        f"còn {len(pending)}/{total} đoạn · {n_workers} luồng ──"
+                    )
+                    done_n = total - len(pending)  # baseline for this pass UI
+                    o_ok, o_fail = await run_jobs(
+                        pending,
+                        proxy_url=self.proxy or "",
+                        proxy_api_key=self.proxy_api_key,
+                        proxy_lines=self.proxy_lines or None,
+                        voice=self.voice,
+                        model=self.model,
+                        lang=self.lang,
+                        speed=self.speed,
+                        hsw_workers=self.hsw_workers,
+                        workers=n_workers,
+                        tokens_per_lane=max(3, n_workers),
+                        max_attempts=40,
+                        should_stop=lambda: self._stop,
+                        on_start=on_start,
+                        on_status=on_status,
+                        on_done=on_done,
+                    )
+                    ok, fail = o_ok, o_fail
+                    still = sum(
+                        1
+                        for j in all_jobs
+                        if not self._good_mp3(j.get("out_path") or "")
+                    )
+                    if still == 0:
+                        break
+                    if outer < OUTER_ROUNDS and not self._stop:
+                        wait = min(10.0, 1.5 * outer)
+                        self.log.emit(
+                            f"Còn {still} đoạn thiếu — chờ {wait:.0f}s rồi gen lại "
+                            f"(chỉ đoạn thiếu, đoạn OK giữ nguyên)…"
+                        )
+                        await asyncio.sleep(wait)
+
+            asyncio.run(_run_all())
+
+            # Merge per file — chỉ khi ĐỦ mọi leaf trên disk
+            for fn in file_meta:
+                if self._stop:
+                    break
+                try_merge_file(fn, force_log=True)
+
+            # Final counts from disk truth (không tin counter pipeline)
+            disk_ok = sum(
+                1
+                for c in self.chunks
+                if self._good_mp3(c.get("out_path") or c.get("path") or "")
+            )
+            disk_fail = total - disk_ok
+            ok, fail = disk_ok, disk_fail
+            if disk_fail > 0:
+                self.log.emit(
+                    f"⚠ KẾT THÚC: {disk_ok}/{total} đoạn OK · thiếu {disk_fail} đoạn. "
+                    f"File MP3 tổng CHỈ merge khi đủ 100% đoạn — "
+                    f"nếu ghép tay các doan_* thiếu sẽ RA NGẮN / SÓT NỘI DUNG."
+                )
+            else:
+                self.log.emit(f"✅ KẾT THÚC: đủ {disk_ok}/{total} đoạn trên disk.")
         except Exception as e:
             self.log.emit(f"❌ Lỗi hệ thống: {e}")
             ok, fail = 0, total
@@ -1689,6 +1778,28 @@ class PreviewTab(QtWidgets.QWidget):
         self._batch.file_progress.connect(self._on_progress)
         self._batch.finished.connect(self._on_finished)
         self._batch.start()
+        # presence: online = đang gen (admin)
+        import time as _time
+        import uuid as _uuid
+
+        self._gen_session_id = _uuid.uuid4().hex[:16]
+        self._gen_ok = 0
+        self._gen_fail = 0
+        self._gen_total = len(self._chunks)
+        self._gen_workers = workers
+        self._presence_last = 0.0
+        try:
+            accounts.report_gen_start(
+                self.user,
+                kind="preview",
+                workers=workers,
+                total=len(self._chunks),
+                label=f"{model} · {len(self._chunks)} đoạn",
+                session_id=self._gen_session_id,
+            )
+            self._presence_last = _time.time()
+        except Exception:
+            pass
         self._set_status(
             f"Đang tạo {len(self._chunks)} đoạn · model {model} · "
             f"{workers} luồng · {len(proxy_lines)} proxy · ~{total_chars:,} ký tự…"
@@ -1736,6 +1847,7 @@ class PreviewTab(QtWidgets.QWidget):
                     pass
                 self._set_chunk_status(row, "Xong")
                 self._bump_queue_file(fname, ok=True)
+                self._gen_ok = int(getattr(self, "_gen_ok", 0) or 0) + 1
                 # refresh size cell if visible
                 start = self._chunk_page * CHUNK_PAGE_SIZE
                 if start <= row < start + CHUNK_PAGE_SIZE:
@@ -1752,6 +1864,7 @@ class PreviewTab(QtWidgets.QWidget):
                         except Exception:
                             pass
             else:
+                self._gen_fail = int(getattr(self, "_gen_fail", 0) or 0) + 1
                 self._set_chunk_status(row, "Lỗi")
                 self._bump_queue_file(fname, ok=False)
                 start = self._chunk_page * CHUNK_PAGE_SIZE
@@ -1762,6 +1875,25 @@ class PreviewTab(QtWidgets.QWidget):
                         if item:
                             item.setToolTip(err or "Lỗi không rõ")
 
+            # throttle presence heartbeat ~20s (online = đang gen)
+            try:
+                import time as _time
+
+                now = _time.time()
+                if now - float(getattr(self, "_presence_last", 0) or 0) >= 20:
+                    self._presence_last = now
+                    accounts.report_gen_heartbeat(
+                        self.user,
+                        kind="preview",
+                        workers=int(getattr(self, "_gen_workers", 0) or 0),
+                        ok=int(getattr(self, "_gen_ok", 0) or 0),
+                        fail=int(getattr(self, "_gen_fail", 0) or 0),
+                        total=int(getattr(self, "_gen_total", 0) or 0),
+                        session_id=str(getattr(self, "_gen_session_id", "") or ""),
+                    )
+            except Exception:
+                pass
+
     def _on_progress(self, _fi: int, cur: int, total: int):
         self.progress.setValue(int(100 * cur / max(1, total)))
         self.lbl_result.setText(f"Tiến độ: {cur}/{total} đoạn")
@@ -1771,6 +1903,17 @@ class PreviewTab(QtWidgets.QWidget):
         self.bt_stop.setEnabled(False)
         self.lbl_result.setText(f"Xong: {ok} thành công / {fail} lỗi")
         self.progress.setValue(100 if ok > 0 else self.progress.value())
+        try:
+            accounts.report_gen_stop(
+                self.user,
+                kind="preview",
+                ok=int(ok or 0),
+                fail=int(fail or 0),
+                total=int(getattr(self, "_gen_total", 0) or 0),
+                session_id=str(getattr(self, "_gen_session_id", "") or ""),
+            )
+        except Exception:
+            pass
 
         # refresh queue 100% + merge badge
         merged_paths: list[str] = []

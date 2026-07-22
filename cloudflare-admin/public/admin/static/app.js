@@ -14,6 +14,7 @@ try {
 const state = {
   token: localStorage.getItem("tts_cf_admin") || "",
   page: "accounts",
+  onlineTimer: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -158,8 +159,9 @@ function setNav(page) {
     b.classList.toggle("active", b.dataset.page === page)
   );
   const titles = {
-    overview: ["Overview", "Tổng quan D1 · accounts · proxy pool · gói"],
+    overview: ["Overview", "Tổng quan D1 · accounts · proxy pool · gói · online gen"],
     accounts: ["Accounts", "Username/password · gói ký tự · max luồng (1–5) · proxyxoay"],
+    online: ["Online gen", "User đang gen TTS audio (heartbeat ~2 phút)"],
     proxies: ["Proxy Pool", "Proxyxoay rotating lines"],
     packages: ["Gói ký tự", "Gói theo triệu ký tự gán cho account"],
   };
@@ -175,13 +177,37 @@ async function refreshChip() {
     const d = await api("/dashboard");
     const chip = $("#dash-chip");
     if (chip) {
-      chip.textContent = `${d.accounts || 0} accounts · ${d.proxies_ready || 0} proxies`;
+      const on = Number(d.online_gen != null ? d.online_gen : d.online) || 0;
+      chip.textContent = `${d.accounts || 0} accounts · ${on} online gen · ${d.proxies_ready || 0} proxies`;
+    }
+    const pill = $("#live-pill");
+    if (pill) {
+      const on = Number(d.online_gen != null ? d.online_gen : d.online) || 0;
+      pill.textContent = on > 0 ? `● ${on} gen` : "● D1 live";
     }
   } catch (_) {}
 }
 
+function clearOnlineTimer() {
+  if (state.onlineTimer) {
+    clearInterval(state.onlineTimer);
+    state.onlineTimer = null;
+  }
+}
+
+function fmtDuration(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m < 60) return `${m}m ${r}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
 async function navigate(page) {
   if (!page) return;
+  clearOnlineTimer();
   setNav(page);
   const root = $("#content");
   if (!root) return;
@@ -189,6 +215,7 @@ async function navigate(page) {
   try {
     if (page === "overview") await renderOverview(root);
     else if (page === "accounts") await renderAccounts(root);
+    else if (page === "online") await renderOnline(root);
     else if (page === "proxies") await renderProxies(root);
     else if (page === "packages") await renderPackages(root);
     await refreshChip();
@@ -223,9 +250,11 @@ async function renderOverview(root) {
   const usedSum = accounts.reduce((s, a) => s + (Number(a.chars_used) || 0), 0);
   const quotaSum = accounts.reduce((s, a) => s + (Number(a.char_quota) || 0), 0);
 
+  const onlineN = Number(d.online_gen != null ? d.online_gen : d.online) || 0;
   root.innerHTML = `
     <div class="cards">
       <div class="card"><div class="k">Accounts</div><div class="v">${d.accounts || 0}</div><div class="hint">tenants on D1</div></div>
+      <div class="card"><div class="k">Online gen</div><div class="v ${onlineN ? "ok" : ""}">${onlineN}</div><div class="hint">đang gen TTS (≤2 phút)</div></div>
       <div class="card"><div class="k">Proxy ready</div><div class="v ok">${d.proxies_ready || 0}<span style="font-size:0.9rem;color:var(--muted)">/${proxies.length}</span></div><div class="hint">enabled lines</div></div>
       <div class="card"><div class="k">Gói</div><div class="v">${packages.length}</div><div class="hint">character packages</div></div>
       <div class="card"><div class="k">Used / Quota</div><div class="v">${fmtM(usedSum)}<span style="font-size:0.9rem;color:var(--muted)">/${fmtM(quotaSum)}</span></div><div class="hint">all accounts</div></div>
@@ -295,6 +324,90 @@ async function renderOverview(root) {
       </table>
     </div>
   `;
+}
+
+async function renderOnline(root) {
+  const paint = async () => {
+    const data = await api("/online");
+    const list = data.online || [];
+    const ttl = data.ttl || 120;
+    root.innerHTML = `
+      <div class="cards">
+        <div class="card">
+          <div class="k">Đang gen TTS</div>
+          <div class="v ${list.length ? "ok" : ""}">${list.length}</div>
+          <div class="hint">heartbeat TTL ${ttl}s · auto refresh 10s</div>
+        </div>
+        <div class="card">
+          <div class="k">Tổng workers</div>
+          <div class="v">${list.reduce((s, r) => s + (Number(r.workers) || 0), 0)}</div>
+          <div class="hint">luồng khai báo từ studio</div>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>Online gen <span class="muted" style="font-weight:400;font-size:13px">— user đang tạo audio</span></h3>
+        <p class="muted" style="margin-top:-0.5rem">
+          Studio gửi <code>start</code> khi bấm Gen, <code>heartbeat</code> ~20s, <code>stop</code> khi xong.
+          Mất heartbeat &gt; ${ttl}s → coi như offline.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>User</th><th>Loại</th><th>Luồng</th><th>Tiến độ</th>
+              <th>Thời gian</th><th>Heartbeat</th><th>Label</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              list
+                .map((r) => {
+                  const done =
+                    (Number(r.ok_chunks) || 0) + (Number(r.fail_chunks) || 0);
+                  const total = Number(r.total_chunks) || 0;
+                  const prog =
+                    r.progress_pct != null
+                      ? `${r.progress_pct}% · ${done}/${total || "?"} (ok ${r.ok_chunks || 0} / fail ${r.fail_chunks || 0})`
+                      : total
+                        ? `${done}/${total}`
+                        : "…";
+                  return `<tr>
+                    <td><strong>${esc(r.username)}</strong>
+                      <div class="muted mono" style="font-size:11px">${esc(r.account_id || "")}</div>
+                    </td>
+                    <td>${badge(r.kind || "preview")}</td>
+                    <td>${Number(r.workers) || 0}</td>
+                    <td>${esc(prog)}</td>
+                    <td>${r.duration_s != null ? fmtDuration(r.duration_s) : "—"}</td>
+                    <td class="${r.last_seen_ago_s > 60 ? "error" : "muted"}">${r.last_seen_ago_s != null ? r.last_seen_ago_s + "s trước" : "—"}</td>
+                    <td class="muted" style="font-size:12px">${esc(r.label || r.client || "")}</td>
+                  </tr>`;
+                })
+                .join("") ||
+              `<tr><td colspan="7" class="muted">Chưa có ai đang gen. Mở studio → login account CF → bấm Gen.</td></tr>`
+            }
+          </tbody>
+        </table>
+      </div>
+    `;
+  };
+
+  await paint();
+  clearOnlineTimer();
+  state.onlineTimer = setInterval(() => {
+    if (state.page !== "online") {
+      clearOnlineTimer();
+      return;
+    }
+    paint().catch((e) => {
+      if (isAuthError(e)) {
+        clearOnlineTimer();
+        state.token = "";
+        localStorage.removeItem("tts_cf_admin");
+        showLogin();
+      }
+    });
+    refreshChip().catch(() => {});
+  }, 10000);
 }
 
 async function renderAccounts(root) {
@@ -373,7 +486,7 @@ async function renderAccounts(root) {
       <table>
         <thead>
           <tr>
-            <th>User</th><th>Role</th><th>Gói</th><th>Used / Quota</th>
+            <th>User</th><th>Role</th><th>Online</th><th>Gói</th><th>Used / Quota</th>
             <th>Luồng</th><th>Max chars</th><th>Proxies gắn</th><th></th>
           </tr>
         </thead>
@@ -389,10 +502,18 @@ async function renderAccounts(root) {
                   </div>
                 `).join("")
                 : `<span class="muted" style="font-size:11px">chưa gắn proxy</span>`;
+              const onlineBadge = a.online
+                ? `<span class="badge ok">GEN</span>${
+                    a.gen_online
+                      ? `<div class="muted" style="font-size:10px">${esc(a.gen_online.kind || "")} · ${Number(a.gen_online.workers) || 0}w</div>`
+                      : ""
+                  }`
+                : `<span class="muted" style="font-size:11px">—</span>`;
               return `
             <tr data-id="${esc(a.id)}" class="account-row" style="cursor:pointer" title="Click để sửa">
               <td><strong>${esc(a.username)}</strong></td>
               <td>${badge(a.role || "user")}</td>
+              <td>${onlineBadge}</td>
               <td>${esc(a.package_name || "—")}</td>
               <td>${
                 Number(a.char_quota) <= 0 || a.unlimited
@@ -412,7 +533,7 @@ async function renderAccounts(root) {
               </td>
             </tr>`;
             })
-            .join("") || `<tr><td colspan="8" class="muted">Chưa có account</td></tr>`}
+            .join("") || `<tr><td colspan="9" class="muted">Chưa có account</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -921,9 +1042,11 @@ $$(".nav-btn[data-page]").forEach((b) => {
   }
 })();
 
-// build-9 — create SQL fixed + edit form
-window.__TTS_ADMIN_BUILD = "9";
+// build-10 — online gen presence
+window.__TTS_ADMIN_BUILD = "10";
 
 
 
 // deploy-force 20260721162529
+
+// presence-v10 20260722042429
