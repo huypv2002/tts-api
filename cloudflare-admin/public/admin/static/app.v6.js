@@ -463,7 +463,14 @@ async function renderAccounts(root) {
           <select id="a-pkg"><option value="">— chọn gói —</option>${pkgOpts}</select>
         </div>
         <div class="field"><label>Max luồng (1–5)</label><input id="a-mw" type="number" min="1" max="5" value="3" /></div>
-        <div class="field"><label>Max chars/chunk (0=mặc định)</label><input id="a-mc" type="number" min="0" max="5000" value="0" /></div>
+        <div class="field"><label>Max chars/chunk (0=mặc định 300)</label><input id="a-mc" type="number" min="0" max="5000" value="0" /></div>
+        <div class="field">
+          <label>Cách split chunk</label>
+          <select id="a-split">
+            <option value="line">Theo dòng (paragraph / dòng → câu)</option>
+            <option value="chars">Theo max chars (full cửa sổ, cắt tại , .)</option>
+          </select>
+        </div>
         <div class="field">
           <label>Gắn proxy (chỉ khi tạo mới)</label>
           <select id="a-px"><option value="">— không gắn —</option>${pxOpts}</select>
@@ -487,7 +494,7 @@ async function renderAccounts(root) {
         <thead>
           <tr>
             <th>User</th><th>Role</th><th>Online</th><th>Gói</th><th>Used / Quota</th>
-            <th>Luồng</th><th>Max chars</th><th>Proxies gắn</th><th></th>
+            <th>Luồng</th><th>Max chars</th><th>Split</th><th>Proxies gắn</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -509,6 +516,10 @@ async function renderAccounts(root) {
                       : ""
                   }`
                 : `<span class="muted" style="font-size:11px">—</span>`;
+              const splitLab =
+                String(a.split_mode || "line").toLowerCase() === "chars"
+                  ? "chars"
+                  : "line";
               return `
             <tr data-id="${esc(a.id)}" class="account-row" style="cursor:pointer" title="Click để sửa">
               <td><strong>${esc(a.username)}</strong></td>
@@ -522,6 +533,7 @@ async function renderAccounts(root) {
               }</td>
               <td>${a.max_workers ?? 2}</td>
               <td>${a.max_chars ?? 0}</td>
+              <td><span class="badge ${splitLab === "chars" ? "user" : ""}">${esc(splitLab)}</span></td>
               <td data-stop-row="1">
                 ${proxyListHtml}
                 <button type="button" style="margin-top:4px;font-size:11px;padding:4px 8px" data-act="add-proxy" data-stop-row="1">+ Thêm proxy</button>
@@ -533,7 +545,7 @@ async function renderAccounts(root) {
               </td>
             </tr>`;
             })
-            .join("") || `<tr><td colspan="9" class="muted">Chưa có account</td></tr>`}
+            .join("") || `<tr><td colspan="10" class="muted">Chưa có account</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -553,6 +565,7 @@ async function renderAccounts(root) {
     $("#a-pkg").value = "";
     $("#a-mw").value = "3";
     $("#a-mc").value = "0";
+    if ($("#a-split")) $("#a-split").value = "line";
     $("#a-px").value = "";
     $("#a-px").disabled = false;
     $("#a-enabled").value = "1";
@@ -576,6 +589,9 @@ async function renderAccounts(root) {
     $("#a-pkg").value = a.package_id || "";
     $("#a-mw").value = String(a.max_workers ?? 2);
     $("#a-mc").value = String(a.max_chars ?? 0);
+    if ($("#a-split"))
+      $("#a-split").value =
+        String(a.split_mode || "line").toLowerCase() === "chars" ? "chars" : "line";
     $("#a-px").value = "";
     $("#a-px").disabled = true; // proxy gắn/gỡ ở cột bảng
     $("#a-enabled").value = a.enabled === false || a.enabled === 0 ? "0" : "1";
@@ -631,6 +647,7 @@ async function renderAccounts(root) {
           package_id: $("#a-pkg").value,
           max_workers: mw,
           max_chars: mc,
+          split_mode: ($("#a-split") && $("#a-split").value) || "line",
           proxy_id: $("#a-px").value,
         };
         if (!body.username || !body.password) {
@@ -666,6 +683,7 @@ async function renderAccounts(root) {
         package_id: ($("#a-pkg").value || "").trim(),
         max_workers: mw,
         max_chars: mc,
+        split_mode: ($("#a-split") && $("#a-split").value) || "line",
         enabled: $("#a-enabled").value === "1",
       };
       const pw = $("#a-pass").value;
@@ -1042,11 +1060,13 @@ $$(".nav-btn[data-page]").forEach((b) => {
   }
 })();
 
-// build-10 — online gen presence
-window.__TTS_ADMIN_BUILD = "10";
+// build-11 — split_mode + online
+window.__TTS_ADMIN_BUILD = "11";
 
 
 
 // deploy-force 20260721162529
 
 // presence-v10 20260722042429
+
+// split-v11 20260723074126

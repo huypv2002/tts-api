@@ -97,9 +97,21 @@ def plain_char_count(text: str) -> int:
     return len(strip_ssml_breaks(text or ""))
 
 
+# split_mode values (admin / account)
+SPLIT_MODE_LINE = "line"  # hiện trạng: paragraph theo dòng + smart sentence pack
+SPLIT_MODE_CHARS = "chars"  # tận dụng full max_chars, cắt tại dấu , . cuối cửa sổ
+
+
+def normalize_split_mode(mode: Optional[str] = None) -> str:
+    m = str(mode or SPLIT_MODE_LINE).strip().lower()
+    if m in ("chars", "max_chars", "char", "window", "fill"):
+        return SPLIT_MODE_CHARS
+    return SPLIT_MODE_LINE
+
+
 def smart_split_text(text: str, max_chars: int = 300) -> List[str]:
     """
-    Chia đoạn thông minh (gần v327):
+    Chia đoạn thông minh (gần v327) — dùng trong mode "line":
     1) Cắt theo . ! ? 。！？ …
     2) Gói câu vào chunk ≤ max_chars
     3) Câu quá dài → cắt theo khoảng trắng
@@ -140,6 +152,76 @@ def smart_split_text(text: str, max_chars: int = 300) -> List[str]:
             cur = trial
     flush()
     return chunks if chunks else [text]
+
+
+def split_by_max_chars(text: str, max_chars: int = 300) -> List[str]:
+    """
+    Mode "chars": không split theo dòng/paragraph trước.
+    Lấy cửa sổ full max_chars, cắt lùi về dấu , hoặc . (ưu tiên)
+    gần cuối cửa sổ cho hợp lý; fallback space; cuối cùng hard-cut.
+
+    Ưu tiên vị trí cắt (từ phải sang trái trong window):
+      .  !  ?  …  。  ！  ？   rồi   ,  ;  :
+      rồi khoảng trắng
+    """
+    # gộp whitespace → 1 space (giữ nội dung liền mạch, tận dụng max_chars)
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return []
+    max_chars = max(40, int(max_chars or 300))
+    if len(text) <= max_chars:
+        return [text]
+
+    # punct groups: strong sentence end first, then weak
+    strong = ".!?…。！？"
+    weak = ",;:"
+    min_keep = max(20, max_chars // 5)
+
+    out: List[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= max_chars:
+            out.append(rest.strip())
+            break
+        window = rest[:max_chars]
+        cut = -1
+        # strong punct last in window
+        for i in range(len(window) - 1, min_keep - 1, -1):
+            if window[i] in strong:
+                cut = i
+                break
+        if cut < 0:
+            for i in range(len(window) - 1, min_keep - 1, -1):
+                if window[i] in weak:
+                    cut = i
+                    break
+        if cut >= min_keep:
+            piece = rest[: cut + 1].strip()
+            rest = rest[cut + 1 :].lstrip()
+        else:
+            sp = window.rfind(" ")
+            if sp >= min_keep:
+                piece = rest[:sp].strip()
+                rest = rest[sp:].lstrip()
+            else:
+                piece = window
+                rest = rest[max_chars:].lstrip()
+        if piece:
+            out.append(piece)
+        else:
+            # safety
+            out.append(rest[:max_chars])
+            rest = rest[max_chars:].lstrip()
+    return out if out else [text]
+
+
+def split_text_for_mode(
+    text: str, max_chars: int = 300, split_mode: Optional[str] = None
+) -> List[str]:
+    """Router: line → smart_split_text; chars → split_by_max_chars."""
+    if normalize_split_mode(split_mode) == SPLIT_MODE_CHARS:
+        return split_by_max_chars(text, max_chars)
+    return smart_split_text(text, max_chars)
 
 
 def _split_by_words(text: str, max_chars: int) -> List[str]:
@@ -304,16 +386,16 @@ def expand_paragraph_to_units(
     para_text: str,
     max_chars: int,
     advanced: Optional[dict] = None,
+    split_mode: Optional[str] = None,
 ) -> List[Tuple[str, float]]:
     """
-    1 paragraph → list (text, silence_after=0) ready for TTS.
+    1 paragraph (hoặc full text ở mode chars) → list (text, silence_after=0) ready for TTS.
 
     max_chars = trần ĐỘ DÀI PAYLOAD gửi TTS (kể cả thẻ <break>).
-
-    Trước đây chỉ split text sạch ≤ max_chars rồi chèn SSML → payload phình
-    (vd admin 900 → cột Ký tự 1000+). Giờ re-pack đến khi len(payload) ≤ max_chars.
+    split_mode: line | chars (xem normalize_split_mode).
     """
     adv = normalize_advanced(advanced)
+    mode = normalize_split_mode(split_mode)
     limit = max(40, int(max_chars or 300))
     para_text = (para_text or "").strip()
     if not para_text:
@@ -352,22 +434,19 @@ def expand_paragraph_to_units(
             cut = min(cut, max(20, len(plain) - 1))
             left, right = plain[:cut].strip(), plain[cut:].strip()
             if not right:
-                # không cắt được — trả nguyên (hiếm, từ siêu dài)
                 return [payload]
             return pack_plain(left, depth + 1) + pack_plain(right, depth + 1)
 
         # Ước plain budget từ overhead SSML
         ratio = len(payload) / max(len(plain), 1)
         plain_budget = max(40, int(limit / max(ratio, 1.05) * 0.90))
-        # Không để budget ≥ plain (sẽ loop)
         if plain_budget >= len(plain):
             plain_budget = max(40, len(plain) // 2)
 
-        parts = smart_split_text(plain, plain_budget)
+        parts = split_text_for_mode(plain, plain_budget, mode)
         if len(parts) <= 1:
             left, right = _bisect_plain(plain)
             if not right or left == plain:
-                # hard cut
                 mid = max(20, len(plain) // 2)
                 left, right = plain[:mid].strip(), plain[mid:].strip()
             if not right:
@@ -380,7 +459,6 @@ def expand_paragraph_to_units(
         return out
 
     payloads = pack_plain(para_text)
-    # silence_after luôn 0 — ngắt do <break> trong audio
     return [(t, 0.0) for t in payloads if t]
 
 
@@ -706,12 +784,18 @@ def build_chunks_from_sources(
     max_chars: int,
     output_root: str,
     advanced: Optional[dict] = None,
+    split_mode: Optional[str] = None,
 ) -> List[dict]:
     """
     sources: [{file, path, text, srt_cues?}, ...]
     → leaf chunks (TTS units) with paragraph hierarchy + silence metadata.
+
+    split_mode:
+      - line  (default): paragraph theo \\n\\n / dòng rồi smart_split
+      - chars: không cắt theo dòng — full max_chars, cắt tại , . cuối cửa sổ
     """
     adv = normalize_advanced(advanced)
+    mode = normalize_split_mode(split_mode)
     chunks: List[dict] = []
 
     for fi, s in enumerate(sources):
@@ -727,6 +811,7 @@ def build_chunks_from_sources(
 
         paras: List[dict] = []
         if srt_cues:
+            # SRT: vẫn theo cue (timing); expand bên trong theo split_mode
             for ci, cue in enumerate(srt_cues):
                 paras.append(
                     {
@@ -736,6 +821,11 @@ def build_chunks_from_sources(
                         "srt_end": float(cue.get("end") or 0),
                     }
                 )
+        elif mode == SPLIT_MODE_CHARS:
+            # 1 block liền cho cả file — tận dụng full max_chars
+            body = (s.get("text") or "").strip()
+            if body:
+                paras.append({"text": body, "srt_gap_after": None})
         else:
             for ptext in split_paragraphs(s.get("text") or ""):
                 paras.append({"text": ptext, "srt_gap_after": None})
@@ -746,9 +836,10 @@ def build_chunks_from_sources(
         # expand each paragraph → units
         para_units: List[List[Tuple[str, float]]] = []
         for para in paras:
-            units = expand_paragraph_to_units(para.get("text") or "", max_chars, adv)
+            units = expand_paragraph_to_units(
+                para.get("text") or "", max_chars, adv, split_mode=mode
+            )
             if not units:
-                units = [(" ", 0.0)]  # skip empty? better skip
                 units = []
             para_units.append(units)
 

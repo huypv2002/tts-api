@@ -210,12 +210,14 @@ class LoadFilesWorker(QThread):
         max_chars: int,
         output_dir: str = "",
         advanced: Optional[dict] = None,
+        split_mode: str = "line",
     ):
         super().__init__()
         self.paths = paths
         self.max_chars = max_chars
         self.output_dir = output_dir or ""
         self.advanced = normalize_advanced(advanced)
+        self.split_mode = split_mode or "line"
 
     def run(self):
         try:
@@ -247,8 +249,10 @@ class LoadFilesWorker(QThread):
                         )
                 except Exception as e:
                     self.progress.emit(f"Lỗi đọc tệp {os.path.basename(p)}: {e}")
+            mode = (self.split_mode or "line").lower()
+            mode_lab = "max-chars (, .)" if mode == "chars" else "theo dòng"
             self.progress.emit(
-                f"Đang chia đoạn văn + chunk (≤{self.max_chars} ký tự)…"
+                f"Đang chia chunk ({mode_lab} · ≤{self.max_chars} ký tự)…"
             )
             out_root = self.output_dir or os.path.join(
                 os.path.dirname(__file__), "..", "output"
@@ -259,6 +263,7 @@ class LoadFilesWorker(QThread):
                 int(self.max_chars or 300),
                 out_root,
                 advanced=self.advanced,
+                split_mode=self.split_mode,
             )
             for ch in chunks:
                 op = ch.get("out_path") or ""
@@ -1124,20 +1129,28 @@ class PreviewTab(QtWidgets.QWidget):
                 self._max_chars = int(self.load_config().get("max_chars") or 300)
             except Exception:
                 self._max_chars = 300
+        # split_mode from admin account (line | chars)
+        sm = str(
+            self.user.get("split_mode") or pub.get("split_mode") or "line"
+        ).strip().lower()
+        self._split_mode = (
+            "chars" if sm in ("chars", "max_chars", "char", "fill") else "line"
+        )
         mc = int(self._max_chars or 300)
+        sm_lab = "chars" if self._split_mode == "chars" else "dòng"
         if unlimited:
             self.lbl_login_status.setText(
-                f"{u} · Unlimited · đã gen {used:,} ký tự · {mw} luồng · chunk ≤{mc}"
+                f"{u} · Unlimited · đã gen {used:,} ký tự · {mw} luồng · chunk ≤{mc} · split {sm_lab}"
             )
             self.lbl_account.setText(
-                f"{u} · gói Unlimited · tối đa {mw} luồng · max {mc} ký tự/đoạn"
+                f"{u} · gói Unlimited · tối đa {mw} luồng · max {mc} · split {sm_lab}"
             )
         else:
             self.lbl_login_status.setText(
-                f"{u} · {used:,}/{quota:,} ký tự · {mw} luồng · chunk ≤{mc}"
+                f"{u} · {used:,}/{quota:,} ký tự · {mw} luồng · chunk ≤{mc} · split {sm_lab}"
             )
             self.lbl_account.setText(
-                f"{u} · còn {left:,} ký tự · tối đa {mw} luồng · max {mc} ký tự/đoạn"
+                f"{u} · còn {left:,} ký tự · tối đa {mw} luồng · max {mc} · split {sm_lab}"
             )
 
     def _open_settings(self):
@@ -1410,6 +1423,7 @@ class PreviewTab(QtWidgets.QWidget):
             int(self._max_chars or 300),
             output_dir=out_dir,
             advanced=self._advanced,
+            split_mode=str(getattr(self, "_split_mode", None) or "line"),
         )
         self._load_worker = w
         w.progress.connect(self._set_status)

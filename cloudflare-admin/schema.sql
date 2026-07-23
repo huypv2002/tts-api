@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   max_workers INTEGER NOT NULL DEFAULT 2,
   -- max chars per chunk (0 = use default)
   max_chars INTEGER NOT NULL DEFAULT 0,
+  -- split mode: line (theo dòng/paragraph) | chars (full max_chars, cắt tại , .)
+  split_mode TEXT DEFAULT 'line',
   -- proxy gắn account (inline hoặc proxy_id)
   proxy_id TEXT DEFAULT '',
   proxy_provider TEXT DEFAULT 'proxyxoay_net',

@@ -296,6 +296,12 @@ def public_account(a: dict) -> dict:
         "package_name": a.get("package_name") or "",
         "max_workers": min(MAX_WORKERS_HARD, max(1, int(a.get("max_workers") or 1))),
         "max_chars": int(a.get("max_chars") or 0),
+        "split_mode": (
+            "chars"
+            if str(a.get("split_mode") or "line").strip().lower()
+            in ("chars", "max_chars", "char", "fill")
+            else "line"
+        ),
         "proxy_id": a.get("proxy_id") or "",
         "has_proxy": bool(
             (a.get("proxy_id") and get_proxy(a.get("proxy_id") or ""))
@@ -479,6 +485,13 @@ def _upsert_remote_account(account: dict, password: str) -> dict:
         ),
         # 0 = use studio default (300); >0 = per-user chunk limit from CF admin
         "max_chars": int(account.get("max_chars") or 0),
+        # line = split theo dòng; chars = full max_chars cắt tại , .
+        "split_mode": (
+            "chars"
+            if str(account.get("split_mode") or "line").strip().lower()
+            in ("chars", "max_chars", "char", "fill")
+            else "line"
+        ),
         "proxies": proxies_list,  # Store full proxies list
         "has_proxy": len(proxies_list) > 0,
         "source": "cloudflare-d1",

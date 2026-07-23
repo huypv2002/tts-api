@@ -149,6 +149,8 @@ jobs:
             --include-module=output_layout `
             --include-module=ffmpeg_tools `
             --include-module=multivoice `
+            --include-module=version `
+            --include-module=auto_updater `
             --include-package=ui `
             --include-package=camoufox `
             --include-package=playwright `

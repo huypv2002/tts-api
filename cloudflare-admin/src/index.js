@@ -236,6 +236,12 @@ function apiPathFromUrl(pathname) {
 
 let _presenceSchemaReady = false;
 
+function normalizeSplitMode(v) {
+  const m = String(v || "line").trim().toLowerCase();
+  if (m === "chars" || m === "max_chars" || m === "char" || m === "fill") return "chars";
+  return "line";
+}
+
 async function ensurePresenceSchema(env) {
   if (!env.DB) return;
   if (_presenceSchemaReady) return;
@@ -277,6 +283,14 @@ async function ensurePresenceSchema(env) {
         `CREATE INDEX IF NOT EXISTS idx_gen_online_status ON gen_online(status)`
       ),
     ]);
+    // migrate: split_mode on accounts
+    try {
+      await env.DB.prepare(
+        `ALTER TABLE accounts ADD COLUMN split_mode TEXT DEFAULT 'line'`
+      ).run();
+    } catch (_) {
+      /* column may already exist */
+    }
     _presenceSchemaReady = true;
   } catch (e) {
     // table may already exist partially — keep serving
@@ -443,6 +457,7 @@ async function handleApi(req, env) {
               ),
         max_workers: Math.min(5, Math.max(1, Number(row.max_workers) || 1)),
         max_chars: Number(row.max_chars) || 0,
+        split_mode: normalizeSplitMode(row.split_mode),
         has_proxy: proxiesList.length > 0,
         proxies_sealed,
         proxies_count: proxiesList.length,
@@ -816,7 +831,8 @@ async function handleApi(req, env) {
   if (path === "/accounts" && method === "GET") {
     const r = await env.DB.prepare(
       `SELECT id, username, role, enabled, note, package_id, package_name,
-              char_quota, chars_used, max_workers, max_chars, proxy_id, proxy_host, proxy_port,
+              char_quota, chars_used, max_workers, max_chars, split_mode,
+              proxy_id, proxy_host, proxy_port,
               proxy_username, proxy_label, api_key_prefix, created_at, last_login_at
        FROM accounts ORDER BY created_at DESC`
     ).all();
@@ -858,6 +874,7 @@ async function handleApi(req, env) {
             !!a.proxy_api_key,
           max_workers: Math.min(5, Math.max(1, a.max_workers || 1)),
           max_chars: Number(a.max_chars) || 0,
+          split_mode: normalizeSplitMode(a.split_mode),
           proxy_provider: a.proxy_provider || "proxyxoay_net",
           proxies: proxies
         };
@@ -966,17 +983,18 @@ async function handleApi(req, env) {
       }
     }
 
-    // 24 columns: 22 binds + chars_used=0 + created_at=datetime('now')
+    const split_mode = normalizeSplitMode(b.split_mode);
+    // 25 columns: 23 binds + chars_used=0 + created_at=datetime('now')
     await env.DB.prepare(
       `INSERT INTO accounts (
         id, username, password_salt, password_hash, role, enabled, note,
-        package_id, package_name, char_quota, chars_used, max_workers, max_chars,
+        package_id, package_name, char_quota, chars_used, max_workers, max_chars, split_mode,
         proxy_id, proxy_provider, proxy_api_key, proxy_username, proxy_password,
         proxy_host, proxy_port, proxy_label, api_key_hash, api_key_prefix, created_at
       ) VALUES (
         ?,?,?,?,?,?,?,?,?,?,
         0,
-        ?,?,?,?,?,?,?,?,?,?,?,?,
+        ?,?,?,?,?,?,?,?,?,?,?,?,?,
         datetime('now')
       )`
     )
@@ -993,6 +1011,7 @@ async function handleApi(req, env) {
         char_quota,
         max_workers,
         Number(b.max_chars) || 0,
+        split_mode,
         proxy_id,
         proxy_provider,
         proxy_api_key,
@@ -1015,6 +1034,7 @@ async function handleApi(req, env) {
       char_quota,
       max_workers,
       max_chars: Number(b.max_chars) || 0,
+      split_mode,
       proxy_id,
       proxy_provider,
     });
@@ -1058,6 +1078,10 @@ async function handleApi(req, env) {
     );
 
     const max_chars = b.max_chars != null ? Number(b.max_chars) : (Number(row.max_chars) || 0);
+    const split_mode =
+      b.split_mode != null
+        ? normalizeSplitMode(b.split_mode)
+        : normalizeSplitMode(row.split_mode);
 
     let proxy_id = b.proxy_id != null ? b.proxy_id : row.proxy_id;
     let proxy_provider = b.proxy_provider || row.proxy_provider || "proxyxoay_net";
@@ -1104,7 +1128,7 @@ async function handleApi(req, env) {
       `UPDATE accounts SET
         role=?, enabled=?, note=?,
         package_id=?, package_name=?, char_quota=?,
-        max_workers=?, max_chars=?,
+        max_workers=?, max_chars=?, split_mode=?,
         proxy_id=?, proxy_provider=?, proxy_api_key=?,
         proxy_username=?,
         proxy_password=CASE WHEN ? = '' THEN proxy_password ELSE ? END,
@@ -1122,6 +1146,7 @@ async function handleApi(req, env) {
         char_quota,
         max_workers,
         max_chars,
+        split_mode,
         proxy_id || "",
         proxy_provider,
         proxy_api_key || "",
@@ -1144,6 +1169,7 @@ async function handleApi(req, env) {
       proxy_id,
       proxy_provider,
       max_chars,
+      split_mode,
       package_id,
       package_name,
       char_quota,

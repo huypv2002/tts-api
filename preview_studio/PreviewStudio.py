@@ -125,7 +125,14 @@ except Exception as e:
     )
     raise SystemExit(2)
 
-APP_NAME = "ElevenLabs Unlimited Studio"
+try:
+    from version import APP_VERSION, APP_NAME as _VER_APP_NAME  # noqa: E402
+
+    APP_NAME = _VER_APP_NAME
+except Exception:
+    APP_VERSION = "1.1.0"
+    APP_NAME = "ElevenLabs Unlimited Studio"
+
 LOGIN_TEMP_FILE = os.path.join(_APP_DIR, "login_temp.json")
 CONFIG_FILE = os.path.join(_APP_DIR, "preview_studio_config.json")
 
@@ -402,10 +409,13 @@ class LoginDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, user: dict):
         super().__init__()
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} · v{APP_VERSION}")
         self.resize(1260, 820)
         self.setMinimumSize(1040, 680)
         self.user = user
+        self._update_checker = None
+        self._update_downloader = None
+        self._pending_update = None
         # Tab: TTS generate + Edit MP3 (ffmpeg copy)
         cfg = load_config()
         out_dir = cfg.get("output_dir") or os.path.join(_APP_DIR, "output")
@@ -430,6 +440,124 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tabs.addTab(self._edit, "Edit MP3")
         self.setCentralWidget(self._tabs)
         self.setStyleSheet("QMainWindow { background: #f2f2f2; }")
+        self._build_menu()
+        # Auto-check update ~3s after show (like Veo3)
+        QtCore.QTimer.singleShot(3000, lambda: self._check_for_update(silent=True))
+
+    def _build_menu(self):
+        bar = self.menuBar()
+        m_help = bar.addMenu("Trợ giúp")
+        act_upd = m_help.addAction("Kiểm tra cập nhật…")
+        act_upd.triggered.connect(lambda: self._check_for_update(silent=False))
+        act_ver = m_help.addAction(f"Phiên bản {APP_VERSION}")
+        act_ver.setEnabled(False)
+
+    def _check_for_update(self, silent: bool = True):
+        try:
+            from auto_updater import UpdateChecker
+        except Exception as e:
+            if not silent:
+                QtWidgets.QMessageBox.warning(
+                    self, "Cập nhật", f"Không tải module updater:\n{e}"
+                )
+            return
+        if self._update_checker and self._update_checker.isRunning():
+            return
+        self._update_checker = UpdateChecker()
+        self._update_checker.result.connect(
+            lambda has, info: self._on_update_check(has, info, silent)
+        )
+        self._update_checker.start()
+
+    def _on_update_check(self, has_update: bool, info: dict, silent: bool):
+        err = (info or {}).get("error") or ""
+        if err and not silent:
+            QtWidgets.QMessageBox.information(
+                self, "Cập nhật", f"Không kiểm tra được:\n{err}"
+            )
+            return
+        if not has_update:
+            if not silent:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Cập nhật",
+                    f"Bạn đang dùng bản mới nhất (v{APP_VERSION}).",
+                )
+            return
+        tag = (info or {}).get("tag") or "?"
+        notes = ((info or {}).get("notes") or "").strip()
+        size_mb = int((info or {}).get("size") or 0) / (1024 * 1024)
+        size_s = f" · ~{size_mb:.0f} MB" if size_mb > 1 else ""
+        msg = (
+            f"Có bản mới từ GitHub: {tag}{size_s}\n"
+            f"Bản hiện tại: v{APP_VERSION}\n\n"
+        )
+        if notes:
+            msg += notes[:600] + ("…" if len(notes) > 600 else "") + "\n\n"
+        msg += "Tải và cài đặt ngay? (app sẽ đóng rồi mở lại)"
+        r = QtWidgets.QMessageBox.question(
+            self,
+            "Cập nhật TTS Studio",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        url = (info or {}).get("download_url") or ""
+        if not url:
+            QtWidgets.QMessageBox.warning(self, "Cập nhật", "Thiếu URL tải.")
+            return
+        self._pending_update = info
+        self._start_download_update(url)
+
+    def _start_download_update(self, url: str):
+        try:
+            from auto_updater import UpdateDownloader
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Cập nhật", str(e))
+            return
+        self._upd_dlg = QtWidgets.QProgressDialog(
+            "Đang tải bản mới…", "Hủy", 0, 100, self
+        )
+        self._upd_dlg.setWindowTitle("Cập nhật")
+        self._upd_dlg.setWindowModality(QtCore.Qt.WindowModal)
+        self._upd_dlg.setMinimumDuration(0)
+        self._upd_dlg.setValue(0)
+        self._update_downloader = UpdateDownloader(url)
+        self._update_downloader.progress.connect(self._upd_dlg.setValue)
+        self._update_downloader.finished.connect(self._on_download_finished)
+        self._upd_dlg.canceled.connect(self._update_downloader.stop)
+        self._update_downloader.start()
+        self._upd_dlg.show()
+
+    def _on_download_finished(self, ok: bool, path_or_err: str):
+        try:
+            self._upd_dlg.close()
+        except Exception:
+            pass
+        if not ok:
+            QtWidgets.QMessageBox.warning(
+                self, "Cập nhật", f"Tải/giải nén thất bại:\n{path_or_err}"
+            )
+            return
+        # Save state so next launch knows we applied this build
+        try:
+            from auto_updater import apply_update, save_update_state
+
+            info = self._pending_update or {}
+            save_update_state(
+                {
+                    "asset_updated_at": info.get("asset_updated_at") or "",
+                    "tag": info.get("tag") or "",
+                    "app_version": APP_VERSION,
+                }
+            )
+            apply_update(path_or_err)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Cập nhật", f"Không áp dụng được update:\n{e}"
+            )
 
     def show_tts_tab(self):
         self._tabs.setCurrentWidget(self._gen)
