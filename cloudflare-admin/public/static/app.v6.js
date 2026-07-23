@@ -977,8 +977,14 @@ async function renderProxies(root) {
         ? "•••••••• (để trống = giữ)"
         : "";
       $("#p-pass-hint").textContent = p.password ? "(đã có password)" : "";
-      $("#p-host").value = p.host || "vipvn7.proxyxoay.net";
-      $("#p-port").value = String(p.port || 8978);
+      // shop: host/port chỉ fallback; net: rotating host
+      if (String(p.provider || "").includes("shop")) {
+        $("#p-host").value = p.host || "";
+        $("#p-port").value = String(p.port || 0);
+      } else {
+        $("#p-host").value = p.host || "vipvn7.proxyxoay.net";
+        $("#p-port").value = String(p.port || 8978);
+      }
       if ($("#p-nhamang"))
         $("#p-nhamang").value = p.shop_nhamang || "random";
       if ($("#p-tinh"))

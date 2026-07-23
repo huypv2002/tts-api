@@ -822,10 +822,11 @@ async function handleApi(req, env) {
     } else if (!note && existing && existing.note) {
       note = existing.note;
     }
+    // shop: exit IP lấy từ get.php — KHÔNG gắn vipvn7 (gây static fallback sai)
     const host =
       provider === "proxyxoay_shop"
-        ? b.host || ""
-        : b.host || "vipvn7.proxyxoay.net";
+        ? String(b.host || "").trim()
+        : String(b.host || "vipvn7.proxyxoay.net").trim() || "vipvn7.proxyxoay.net";
     const port =
       provider === "proxyxoay_shop"
         ? Number(b.port) || 0

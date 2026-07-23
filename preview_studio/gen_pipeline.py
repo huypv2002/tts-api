@@ -247,23 +247,75 @@ class ProxyLane:
             await asyncio.sleep(min(1.5, max(0.2, left)))
 
     async def start(self, farm, tokens_per_lane: int = 0) -> None:
-        try:
-            self.proxy_url = await asyncio.to_thread(resolve_proxy_line, self.line)
-        except Exception as e:
-            # static fallback from host/user
-            host = self.line.get("host")
-            port = int(self.line.get("port") or 0)
-            user = self.line.get("username") or ""
-            pw = self.line.get("password") or ""
-            if host and port:
-                self.proxy_url = (
-                    f"http://{user}:{pw}@{host}:{port}"
-                    if user and pw
-                    else f"http://{host}:{port}"
-                )
-                log(f"  [lane{self.lane_id}] resolve API fail, static: {e}")
-            else:
-                raise
+        """
+        Resolve exit IP. Shop: get.php (retry khi 101 cooldown).
+        KHÔNG fallback vipvn7:8978 không auth — gây dial hcaptcha fail.
+        """
+        last_err: Exception | None = None
+        for attempt in range(1, 5):
+            try:
+                self.proxy_url = await asyncio.to_thread(resolve_proxy_line, self.line)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                wait_s = _parse_wait(e, default=60.0)
+                # 101 / cooldown: đợi rồi gọi lại get.php — không static fallback
+                if (
+                    self.provider == "proxyxoay_shop"
+                    and (
+                        "status=101" in msg
+                        or "status=102" in msg
+                        or "doi proxy" in msg.lower()
+                        or "wait_s=" in msg
+                    )
+                ):
+                    if "status=102" in msg or "khong ton tai" in msg.lower():
+                        log(
+                            f"  [lane{self.lane_id}] SHOP KEY INVALID (102) — "
+                            f"đổi key trên admin Proxies · {msg[:120]}"
+                        )
+                        raise RuntimeError(
+                            f"Proxy shop key không tồn tại/hết hạn (102). "
+                            f"Sửa API key trên admin → login lại studio. Chi tiết: {msg}"
+                        ) from e
+                    # cooldown
+                    sleep_for = max(3.0, min(90.0, wait_s + 1.5))
+                    log(
+                        f"  [lane{self.lane_id}] shop cooldown "
+                        f"({attempt}/4) chờ {sleep_for:.0f}s — {msg[:100]}"
+                    )
+                    await asyncio.sleep(sleep_for)
+                    continue
+                # net / static: chỉ fallback khi có user+pass thật (không bare host)
+                host = (self.line.get("host") or "").strip()
+                port = int(self.line.get("port") or 0)
+                user = (self.line.get("username") or "").strip()
+                pw = (self.line.get("password") or "").strip()
+                if (
+                    self.provider != "proxyxoay_shop"
+                    and host
+                    and port
+                    and user
+                    and pw
+                ):
+                    self.proxy_url = f"http://{user}:{pw}@{host}:{port}"
+                    log(
+                        f"  [lane{self.lane_id}] resolve API fail, "
+                        f"static auth URL: {e}"
+                    )
+                    last_err = None
+                    break
+                if attempt >= 4:
+                    break
+                log(f"  [lane{self.lane_id}] resolve retry {attempt}/4: {msg[:120]}")
+                await asyncio.sleep(min(15.0, 2.0 * attempt))
+        if last_err is not None or not getattr(self, "proxy_url", None):
+            raise RuntimeError(
+                f"Không resolve được proxy lane{self.lane_id} "
+                f"({self.label}/{self.provider}): {last_err}"
+            ) from last_err
         self.line["url"] = self.proxy_url
         # shop: get.php lúc start đã tốn 1 slot chu kỳ xoay → chặn spam ngay
         # net: status chỉ đọc IP hiện tại, chưa change-ip → _last_change=0 OK
