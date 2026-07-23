@@ -769,6 +769,35 @@ async function handleApi(req, env) {
     });
     return json({ proxies: rows });
   }
+  // GET /proxies/:id — full secrets for admin edit form
+  if (path.startsWith("/proxies/") && method === "GET") {
+    const id = path.split("/")[2];
+    if (!id || id === "undefined") return err("id required", 400);
+    const p = await env.DB.prepare(
+      "SELECT id, label, enabled, provider, host, port, username, password, api_key, note, created_at FROM proxies WHERE id = ?"
+    )
+      .bind(id)
+      .first();
+    if (!p) return err("not found", 404);
+    const shop = parseShopNote(p.note);
+    return json({
+      proxy: {
+        id: p.id,
+        label: p.label || "",
+        enabled: !!p.enabled,
+        provider: p.provider || "proxyxoay_net",
+        host: p.host || "",
+        port: Number(p.port) || 0,
+        username: p.username || "",
+        password: p.password || "",
+        api_key: p.api_key || "",
+        note: p.note || "",
+        created_at: p.created_at,
+        ...shop,
+      },
+    });
+  }
+
   if (path === "/proxies" && method === "POST") {
     const b = await req.json();
     const id = b.id || "px_" + crypto.randomUUID().slice(0, 8);
@@ -777,11 +806,16 @@ async function handleApi(req, env) {
     )
       .bind(id)
       .first();
-    const password =
-      b.password || (existing && existing.password) || "";
+    // empty / masked "xxxx…" → keep existing secret on update
+    let password = String(b.password || "");
+    if (!password || password.includes("…") || password.includes("...")) {
+      password = (existing && existing.password) || "";
+    }
     const provider = b.provider || "proxyxoay_net";
-    const api_key =
-      b.api_key || (existing && existing.api_key) || "";
+    let api_key = String(b.api_key || "").trim();
+    if (!api_key || api_key.includes("…") || api_key.endsWith("...")) {
+      api_key = (existing && existing.api_key) || "";
+    }
     let note = b.note || "";
     if (String(provider).includes("shop")) {
       note = buildShopNote(b);

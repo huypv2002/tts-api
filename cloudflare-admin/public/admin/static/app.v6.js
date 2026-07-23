@@ -828,11 +828,15 @@ async function renderProxies(root) {
   const data = await api("/proxies");
   const list = data.proxies || [];
   const ready = list.filter((p) => p.enabled).length;
+  const byId = Object.fromEntries(list.map((p) => [p.id, p]));
 
   root.innerHTML = `
-    <div class="panel">
-      <h3>Thêm / sửa proxy</h3>
-      <p class="muted">proxyxoay.net (rotating host) hoặc proxyxoay.shop (get.php key). Gắn cho user ở tab Accounts.</p>
+    <div class="panel" id="p-form-panel">
+      <h3 id="p-form-title">Thêm proxy</h3>
+      <p class="muted" id="p-form-hint">
+        Click <strong>Sửa</strong> trên 1 hàng để sửa key/host/label.
+        API key / password để trống khi sửa = <strong>giữ giá trị cũ</strong>.
+      </p>
       <div class="grid-2">
         <div class="field"><label>ID</label><input id="p-id" placeholder="auto nếu trống" /></div>
         <div class="field"><label>Label</label><input id="p-label" placeholder="EU #1 / Shop FPT" /></div>
@@ -843,9 +847,15 @@ async function renderProxies(root) {
             <option value="proxyxoay_shop">proxyxoay.shop</option>
           </select>
         </div>
-        <div class="field"><label>API key</label><input id="p-key" placeholder="key mua hàng / rotating key" /></div>
+        <div class="field">
+          <label>API key <span class="muted" id="p-key-hint"></span></label>
+          <input id="p-key" placeholder="key mua hàng / rotating key" autocomplete="off" />
+        </div>
         <div class="field" data-net-only><label>Username</label><input id="p-user" /></div>
-        <div class="field" data-net-only><label>Password</label><input id="p-pass" type="password" /></div>
+        <div class="field" data-net-only>
+          <label>Password <span class="muted" id="p-pass-hint"></span></label>
+          <input id="p-pass" type="password" autocomplete="new-password" />
+        </div>
         <div class="field" data-net-only><label>Host</label><input id="p-host" placeholder="vipvn7.proxyxoay.net" value="vipvn7.proxyxoay.net" /></div>
         <div class="field" data-net-only><label>Port</label><input id="p-port" type="number" value="8978" /></div>
         <div class="field" data-shop-only style="display:none"><label>Nhà mạng</label>
@@ -857,20 +867,26 @@ async function renderProxies(root) {
         <div class="field" data-shop-only style="display:none"><label>Whitelist IPv4</label>
           <input id="p-wl" placeholder="tuỳ chọn" />
         </div>
+        <div class="field">
+          <label>Enabled</label>
+          <select id="p-enabled"><option value="1">Bật</option><option value="0">Tắt</option></select>
+        </div>
       </div>
-      <div class="form-actions">
-        <button class="primary" type="button" id="p-save">Lưu proxy</button>
+      <div class="form-actions" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <button class="primary" type="button" id="p-save">Thêm proxy</button>
+        <button type="button" id="p-cancel" class="hidden">Hủy / form mới</button>
+        <span class="muted" id="p-edit-label" style="font-size:12px"></span>
       </div>
     </div>
     <div class="panel">
-      <h3>Pool (${ready}/${list.length} enabled)</h3>
+      <h3>Pool (${ready}/${list.length} enabled) <span class="muted" style="font-weight:400;font-size:13px">— Sửa để đổi key</span></h3>
       <table>
         <thead><tr><th>ID</th><th>Label</th><th>Provider</th><th>Host / Key</th><th>On</th><th></th></tr></thead>
         <tbody>
           ${list
             .map(
               (p) => `
-            <tr>
+            <tr data-id="${esc(p.id)}" class="account-row" style="cursor:pointer" title="Click để sửa">
               <td class="mono">${esc(p.id)}</td>
               <td>${esc(p.label || "")}</td>
               <td>${esc((p.provider || "net").replace("proxyxoay_", ""))}</td>
@@ -880,8 +896,9 @@ async function renderProxies(root) {
                   : esc((p.host || "") + ":" + (p.port || ""))
               }</td>
               <td>${p.enabled ? badge("ready") : badge("dead")}</td>
-              <td>
-                <button type="button" class="danger" data-del="${esc(p.id)}">Xóa</button>
+              <td class="row" style="margin:0;gap:4px" data-stop-row="1">
+                <button type="button" data-act="edit" data-id="${esc(p.id)}" data-stop-row="1">Sửa</button>
+                <button type="button" class="danger" data-del="${esc(p.id)}" data-stop-row="1">Xóa</button>
               </td>
             </tr>`
             )
@@ -901,11 +918,97 @@ async function renderProxies(root) {
     });
   };
   $("#p-prov").onchange = syncProv;
-  syncProv();
+
+  function setCreateMode() {
+    $("#p-form-title").textContent = "Thêm proxy";
+    $("#p-form-hint").textContent =
+      "proxyxoay.net (rotating host) hoặc proxyxoay.shop (get.php key). Gắn user ở tab Accounts.";
+    $("#p-id").value = "";
+    $("#p-id").disabled = false;
+    $("#p-label").value = "";
+    $("#p-prov").value = "proxyxoay_net";
+    $("#p-key").value = "";
+    $("#p-key").placeholder = "key mua hàng / rotating key";
+    $("#p-key-hint").textContent = "";
+    $("#p-user").value = "";
+    $("#p-pass").value = "";
+    $("#p-pass").placeholder = "";
+    $("#p-pass-hint").textContent = "";
+    $("#p-host").value = "vipvn7.proxyxoay.net";
+    $("#p-port").value = "8978";
+    if ($("#p-nhamang")) $("#p-nhamang").value = "random";
+    if ($("#p-tinh")) $("#p-tinh").value = "0";
+    if ($("#p-wl")) $("#p-wl").value = "";
+    $("#p-enabled").value = "1";
+    $("#p-save").textContent = "Thêm proxy";
+    $("#p-cancel").classList.add("hidden");
+    $("#p-edit-label").textContent = "";
+    root.querySelectorAll("tr.account-row").forEach((r) => r.classList.remove("row-selected"));
+    syncProv();
+  }
+
+  async function setEditMode(id) {
+    if (!id) return;
+    try {
+      // full secrets for edit
+      const detail = await api(`/proxies/${encodeURIComponent(id)}`);
+      const p = detail.proxy || byId[id] || {};
+      $("#p-form-title").textContent = `Sửa proxy · ${p.id || id}`;
+      $("#p-form-hint").textContent =
+        "API key / password để trống = giữ giá trị cũ. Đổi key shop nếu gặp lỗi 102.";
+      $("#p-id").value = p.id || id;
+      $("#p-id").disabled = true; // id không đổi
+      $("#p-label").value = p.label || "";
+      const prov = p.provider || "proxyxoay_net";
+      $("#p-prov").value = String(prov).includes("shop")
+        ? "proxyxoay_shop"
+        : "proxyxoay_net";
+      // never put masked key into the field
+      $("#p-key").value = p.api_key || "";
+      $("#p-key").placeholder = p.api_key
+        ? "•••••••• (đổi nếu cần)"
+        : "key mua hàng / rotating key";
+      $("#p-key-hint").textContent = p.api_key
+        ? "(đã load key đầy đủ)"
+        : "(chưa có key)";
+      $("#p-user").value = p.username || "";
+      $("#p-pass").value = "";
+      $("#p-pass").placeholder = p.password
+        ? "•••••••• (để trống = giữ)"
+        : "";
+      $("#p-pass-hint").textContent = p.password ? "(đã có password)" : "";
+      $("#p-host").value = p.host || "vipvn7.proxyxoay.net";
+      $("#p-port").value = String(p.port || 8978);
+      if ($("#p-nhamang"))
+        $("#p-nhamang").value = p.shop_nhamang || "random";
+      if ($("#p-tinh"))
+        $("#p-tinh").value = String(
+          p.shop_tinhthanh != null ? p.shop_tinhthanh : "0"
+        );
+      if ($("#p-wl")) $("#p-wl").value = p.shop_whitelist || "";
+      $("#p-enabled").value =
+        p.enabled === false || p.enabled === 0 ? "0" : "1";
+      $("#p-save").textContent = "Lưu thay đổi";
+      $("#p-cancel").classList.remove("hidden");
+      $("#p-edit-label").textContent = `Đang sửa · ${esc(p.id || id)}`;
+      root.querySelectorAll("tr.account-row").forEach((r) => {
+        r.classList.toggle("row-selected", r.dataset.id === id);
+      });
+      syncProv();
+      const panel = $("#p-form-panel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) {
+      toast(e.message || "Không tải được proxy");
+    }
+  }
+
+  $("#p-cancel").onclick = () => setCreateMode();
+  setCreateMode();
 
   $("#p-save").onclick = async () => {
     try {
       const provider = $("#p-prov").value || "proxyxoay_net";
+      const editing = $("#p-id").disabled && $("#p-id").value.trim();
       const body = {
         id: $("#p-id").value.trim() || undefined,
         label: $("#p-label").value.trim(),
@@ -914,23 +1017,51 @@ async function renderProxies(root) {
         password: $("#p-pass").value,
         host: $("#p-host").value.trim(),
         port: +$("#p-port").value || 8978,
-        enabled: true,
+        enabled: $("#p-enabled").value === "1",
         provider,
         shop_nhamang: $("#p-nhamang") ? $("#p-nhamang").value.trim() : "random",
         shop_tinhthanh: $("#p-tinh") ? $("#p-tinh").value.trim() : 0,
         shop_whitelist: $("#p-wl") ? $("#p-wl").value.trim() : "",
         shop_method: "GET",
       };
+      if (editing && !body.id) {
+        toast("Thiếu ID proxy");
+        return;
+      }
+      // create shop: require key; edit: empty = keep
+      if (
+        String(provider).includes("shop") &&
+        !editing &&
+        !body.api_key
+      ) {
+        toast("Shop cần API key");
+        return;
+      }
       await api("/proxies", { method: "POST", body: JSON.stringify(body) });
-      toast("Proxy saved · " + provider);
+      toast(editing ? "Đã cập nhật proxy · " + provider : "Đã thêm proxy · " + provider);
       navigate("proxies");
     } catch (e) {
       toast(e.message);
     }
   };
 
+  root.querySelectorAll("tr[data-id]").forEach((tr) => {
+    const id = tr.dataset.id;
+    tr.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-stop-row]")) return;
+      setEditMode(id);
+    });
+    const editBtn = tr.querySelector('[data-act="edit"]');
+    if (editBtn)
+      editBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        setEditMode(id);
+      };
+  });
+
   root.querySelectorAll("[data-del]").forEach((b) => {
-    b.onclick = async () => {
+    b.onclick = async (ev) => {
+      ev.stopPropagation();
       if (!confirm("Xóa proxy?")) return;
       try {
         await api(`/proxies/${b.dataset.del}`, { method: "DELETE" });
@@ -1060,8 +1191,8 @@ $$(".nav-btn[data-page]").forEach((b) => {
   }
 })();
 
-// build-11 — split_mode + online
-window.__TTS_ADMIN_BUILD = "11";
+// build-12 — proxy edit form
+window.__TTS_ADMIN_BUILD = "12";
 
 
 
@@ -1070,3 +1201,5 @@ window.__TTS_ADMIN_BUILD = "11";
 // presence-v10 20260722042429
 
 // split-v11 20260723074126
+
+// proxy-edit-v12 20260723112023
