@@ -130,7 +130,7 @@ try:
 
     APP_NAME = _VER_APP_NAME
 except Exception:
-    APP_VERSION = "1.1.0"
+    APP_VERSION = "1.0.0"
     APP_NAME = "ElevenLabs Unlimited Studio"
 
 LOGIN_TEMP_FILE = os.path.join(_APP_DIR, "login_temp.json")

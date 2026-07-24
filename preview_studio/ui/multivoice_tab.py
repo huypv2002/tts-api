@@ -21,13 +21,11 @@ import accounts_store as accounts
 from multivoice import default_script, parse_script, speakers_in_script
 from output_layout import merge_audio_with_gaps, safe_stem
 
+# Hội thoại (multi-voice) chỉ hỗ trợ eleven_v3 — không cho đổi model.
 DEFAULT_MODEL = "eleven_v3"
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
 MODEL_CHOICES = [
     ("eleven_v3", "eleven_v3 — chất lượng / cảm xúc"),
-    ("eleven_turbo_v2_5", "eleven_turbo_v2_5 — cân bằng"),
-    ("eleven_flash_v2_5", "eleven_flash_v2_5 — nhanh + hỗ trợ vi"),
-    ("eleven_multilingual_v2", "eleven_multilingual_v2 — đa ngôn ngữ"),
 ]
 
 
@@ -448,6 +446,18 @@ class MultivoiceTab(QtWidgets.QWidget):
                 border-bottom: 1px solid #e5e5e5; font-weight: 600;
             }
             QScrollArea { background: transparent; border: none; }
+            QSplitter::handle:horizontal {
+                background: #e5e5e5;
+                width: 6px;
+                margin: 0 2px;
+                border-radius: 3px;
+            }
+            QSplitter::handle:horizontal:hover {
+                background: #a3a3a3;
+            }
+            QSplitter::handle:horizontal:pressed {
+                background: #525252;
+            }
             """
         )
 
@@ -463,13 +473,14 @@ class MultivoiceTab(QtWidgets.QWidget):
             lay.addWidget(lab)
             return frame, lay
 
-        content = QtWidgets.QHBoxLayout()
-        content.setSpacing(10)
         left = QtWidgets.QVBoxLayout()
         left.setSpacing(10)
-        left.setContentsMargins(0, 0, 6, 0)
-        right = QtWidgets.QVBoxLayout()
+        left.setContentsMargins(0, 0, 4, 0)
+        right_w = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(right_w)
+        right.setContentsMargins(4, 0, 0, 0)
         right.setSpacing(10)
+        right_w.setMinimumWidth(360)
 
         # ── TRÁI: nhân vật (cao hơn) ──
         cast_card, cl = card("Nhân vật & giọng")
@@ -518,31 +529,47 @@ class MultivoiceTab(QtWidgets.QWidget):
         src_top.addWidget(self.bt_clear_queue)
         src_l.addLayout(src_top)
 
-        opt = QtWidgets.QHBoxLayout()
-        opt.addWidget(QtWidgets.QLabel("Model"))
+        # 2 hàng — tránh chồng khi panel trái hẹp (sau khi kéo splitter)
+        opt = QtWidgets.QVBoxLayout()
+        opt.setSpacing(6)
+
+        row_model = QtWidgets.QHBoxLayout()
+        row_model.setSpacing(8)
+        row_model.addWidget(QtWidgets.QLabel("Model"))
         self.cb_model = QtWidgets.QComboBox()
         self.cb_model.setMinimumHeight(28)
-        self.cb_model.setMinimumWidth(240)
+        self.cb_model.setMinimumWidth(120)
+        self.cb_model.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
         for mid, label in MODEL_CHOICES:
             self.cb_model.addItem(label, mid)
+        self.cb_model.setCurrentIndex(0)
+        # Khóa model — hội thoại chỉ chạy eleven_v3
+        self.cb_model.setEnabled(False)
         self.cb_model.setToolTip(
-            "Model ElevenLabs (anonymous).\n"
-            "multilingual_v2 không ép language_code=vi."
+            "Tab Hội thoại chỉ dùng eleven_v3 (cảm xúc / multi-speaker).\n"
+            "Không hỗ trợ turbo / flash / multilingual_v2."
         )
-        opt.addWidget(self.cb_model)
-        opt.addWidget(QtWidgets.QLabel("Gap lượt"))
+        row_model.addWidget(self.cb_model, 1)
+        self.lbl_preview = QtWidgets.QLabel("0 lượt · 0 tệp")
+        self.lbl_preview.setObjectName("badge")
+        row_model.addWidget(self.lbl_preview, 0)
+        opt.addLayout(row_model)
+
+        row_gap = QtWidgets.QHBoxLayout()
+        row_gap.setSpacing(8)
+        row_gap.addWidget(QtWidgets.QLabel("Gap lượt"))
         self.sb_gap = QtWidgets.QDoubleSpinBox()
         self.sb_gap.setRange(0.0, 5.0)
         self.sb_gap.setSingleStep(0.05)
         self.sb_gap.setDecimals(2)
         self.sb_gap.setValue(0.35)
         self.sb_gap.setSuffix(" s")
-        self.sb_gap.setMaximumWidth(90)
-        opt.addWidget(self.sb_gap)
-        opt.addStretch(1)
-        self.lbl_preview = QtWidgets.QLabel("0 lượt · 0 tệp")
-        self.lbl_preview.setObjectName("badge")
-        opt.addWidget(self.lbl_preview)
+        self.sb_gap.setFixedWidth(90)
+        row_gap.addWidget(self.sb_gap)
+        row_gap.addStretch(1)
+        opt.addLayout(row_gap)
         src_l.addLayout(opt)
 
         tip_src = QtWidgets.QLabel(
@@ -612,7 +639,7 @@ class MultivoiceTab(QtWidgets.QWidget):
         left_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         left_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        left_scroll.setMinimumWidth(360)
+        left_scroll.setMinimumWidth(320)
         left_scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
             "QScrollBar:vertical { width: 10px; background: transparent; }"
@@ -668,9 +695,18 @@ class MultivoiceTab(QtWidgets.QWidget):
         tl.addWidget(self.tbl_turns, 1)
         right.addWidget(turns_card, 1)
 
-        content.addWidget(left_scroll, 2)
-        content.addLayout(right, 3)
-        root.addLayout(content, 1)
+        self._main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._main_splitter.setObjectName("mainSplitter")
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.setHandleWidth(8)
+        self._main_splitter.setOpaqueResize(True)
+        self._main_splitter.addWidget(left_scroll)
+        self._main_splitter.addWidget(right_w)
+        self._main_splitter.setStretchFactor(0, 2)
+        self._main_splitter.setStretchFactor(1, 3)
+        self._main_splitter.setSizes([420, 680])
+        self._main_splitter.splitterMoved.connect(self._on_splitter_moved)
+        root.addWidget(self._main_splitter, 1)
 
         self.lbl_status = QtWidgets.QLabel("Sẵn sàng.")
         self.lbl_status.setObjectName("muted")
@@ -746,12 +782,9 @@ class MultivoiceTab(QtWidgets.QWidget):
             self.sb_gap.setValue(float(mv.get("gap_seconds", 0.35)))
         except Exception:
             self.sb_gap.setValue(0.35)
-        # model: multivoice.model > global model > default
-        mid = (mv.get("model") or c.get("model") or DEFAULT_MODEL).strip()
-        idx = self.cb_model.findData(mid)
-        if idx < 0:
-            idx = self.cb_model.findData(DEFAULT_MODEL)
+        # Hội thoại luôn eleven_v3 (bỏ qua model cũ trong config nếu có)
         self.cb_model.blockSignals(True)
+        idx = self.cb_model.findData(DEFAULT_MODEL)
         self.cb_model.setCurrentIndex(max(0, idx if idx >= 0 else 0))
         self.cb_model.blockSignals(False)
         cast = mv.get("cast") or []
@@ -767,6 +800,22 @@ class MultivoiceTab(QtWidgets.QWidget):
             self._add_cast_row("Nữ", v2 or DEFAULT_VOICE)
         self._refresh_account()
         self._preview_turns(silent=True)
+        sizes = (c.get("multivoice") or {}).get("splitter_sizes")
+        if (
+            isinstance(sizes, (list, tuple))
+            and len(sizes) == 2
+            and all(isinstance(x, (int, float)) and int(x) > 0 for x in sizes)
+            and hasattr(self, "_main_splitter")
+        ):
+            self._main_splitter.setSizes([int(sizes[0]), int(sizes[1])])
+
+    def _on_splitter_moved(self, *_args):
+        if not hasattr(self, "_splitter_save_timer"):
+            self._splitter_save_timer = QtCore.QTimer(self)
+            self._splitter_save_timer.setSingleShot(True)
+            self._splitter_save_timer.setInterval(350)
+            self._splitter_save_timer.timeout.connect(self._persist)
+        self._splitter_save_timer.start()
 
     def _persist(self):
         c = self.load_config()
@@ -781,15 +830,23 @@ class MultivoiceTab(QtWidgets.QWidget):
                 vid = (w.currentData() or "").strip()
             if name:
                 cast.append({"name": name, "voice_id": vid})
-        mid = (self.cb_model.currentData() or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        c["model"] = mid  # đồng bộ tab Tạo audio
-        c["multivoice"] = {
+        # Không ghi đè model tab Tạo audio — hội thoại luôn v3
+        mid = DEFAULT_MODEL
+        splitter_sizes = None
+        if hasattr(self, "_main_splitter"):
+            sizes = self._main_splitter.sizes()
+            if len(sizes) == 2 and all(s > 0 for s in sizes):
+                splitter_sizes = [int(sizes[0]), int(sizes[1])]
+        mv_payload = {
             "script": self.ed_script.toPlainText(),
             "cast": cast,
             "project_name": self.ed_name.text().strip() or "dialogue",
             "gap_seconds": float(self.sb_gap.value()),
             "model": mid,
         }
+        if splitter_sizes:
+            mv_payload["splitter_sizes"] = splitter_sizes
+        c["multivoice"] = mv_payload
         self.save_config(c)
         self._cfg = c
 
@@ -1253,7 +1310,7 @@ class MultivoiceTab(QtWidgets.QWidget):
         if not px_key and proxy_lines:
             px_key = proxy_lines[0].get("api_key") or ""
 
-        model = (self.cb_model.currentData() or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        model = DEFAULT_MODEL  # hội thoại chỉ eleven_v3
         self._worker = MultivoiceWorker(
             jobs=jobs,
             output_dir=out,

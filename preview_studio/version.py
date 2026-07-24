@@ -5,7 +5,7 @@ Bump APP_VERSION when shipping a new Nuitka build (semver).
 Rolling release tag is tracked separately via asset updated_at.
 """
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.0.0"
 APP_NAME = "ElevenLabs Unlimited Studio"
 
 # GitHub rolling release (CI publishes here)

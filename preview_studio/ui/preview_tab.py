@@ -656,6 +656,18 @@ class PreviewTab(QtWidgets.QWidget):
             QToolButton#settingsButton:hover {
                 color: #ffffff; background: #171717; border-color: #171717;
             }
+            QSplitter::handle:horizontal {
+                background: #e5e5e5;
+                width: 6px;
+                margin: 0 2px;
+                border-radius: 3px;
+            }
+            QSplitter::handle:horizontal:hover {
+                background: #a3a3a3;
+            }
+            QSplitter::handle:horizontal:pressed {
+                background: #525252;
+            }
             """
         )
 
@@ -760,11 +772,16 @@ class PreviewTab(QtWidgets.QWidget):
         self.lbl_settings_msg.setWordWrap(True)
         sl.addWidget(self.lbl_settings_msg)
 
-        content = QtWidgets.QHBoxLayout()
-        left = QtWidgets.QVBoxLayout()
+        left_w = QtWidgets.QWidget()
+        left = QtWidgets.QVBoxLayout(left_w)
+        left.setContentsMargins(0, 0, 4, 0)
         left.setSpacing(10)
-        right = QtWidgets.QVBoxLayout()
+        right_w = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(right_w)
+        right.setContentsMargins(4, 0, 0, 0)
         right.setSpacing(10)
+        left_w.setMinimumWidth(320)
+        right_w.setMinimumWidth(360)
 
         voice_card, voice_l = card("Giọng đọc")
         top_bar = QtWidgets.QHBoxLayout()
@@ -809,12 +826,25 @@ class PreviewTab(QtWidgets.QWidget):
         src_top.addWidget(self.bt_folder)
         src_top.addWidget(self.bt_srt)
         source_l.addLayout(src_top)
-        # voice_settings (payload TTS) — không show luồng/HSW/max đoạn (admin web + fixed 5)
-        opt = QtWidgets.QHBoxLayout()
-        opt.addWidget(QtWidgets.QLabel("Model"))
+        # voice_settings (payload TTS) — 2 hàng để không chồng khi panel trái hẹp
+        opt = QtWidgets.QVBoxLayout()
+        opt.setSpacing(6)
+
+        row_model = QtWidgets.QHBoxLayout()
+        row_model.setSpacing(8)
+        lbl_model = QtWidgets.QLabel("Model")
+        lbl_model.setMinimumWidth(42)
+        row_model.addWidget(lbl_model)
         self.cb_model = QtWidgets.QComboBox()
         self.cb_model.setMinimumHeight(30)
-        self.cb_model.setMinimumWidth(260)
+        self.cb_model.setMinimumWidth(120)
+        self.cb_model.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.cb_model.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.cb_model.setMinimumContentsLength(12)
         for mid, label in MODEL_CHOICES:
             self.cb_model.addItem(label, mid)
         self.cb_model.setToolTip(
@@ -822,24 +852,37 @@ class PreviewTab(QtWidgets.QWidget):
             "• v3 / turbo_v2_5 / flash_v2_5: gửi language_code từ giọng đã lưu\n"
             "• multilingual_v2: không ép language_code (tránh 400 với vi)"
         )
-        opt.addWidget(self.cb_model)
-        opt.addWidget(QtWidgets.QLabel("Tốc độ đọc"))
+        row_model.addWidget(self.cb_model, 1)
+        self.lbl_chunk_summary = QtWidgets.QLabel("0 tệp / 0 đoạn")
+        self.lbl_chunk_summary.setObjectName("badge")
+        self.lbl_chunk_summary.setAlignment(
+            QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight
+        )
+        row_model.addWidget(self.lbl_chunk_summary, 0)
+        opt.addLayout(row_model)
+
+        row_speed = QtWidgets.QHBoxLayout()
+        row_speed.setSpacing(8)
+        lbl_speed = QtWidgets.QLabel("Tốc độ đọc")
+        row_speed.addWidget(lbl_speed)
         self.sb_speed = QtWidgets.QDoubleSpinBox()
         self.sb_speed.setRange(0.70, 1.20)
         self.sb_speed.setSingleStep(0.05)
         self.sb_speed.setDecimals(2)
         self.sb_speed.setValue(1.00)
+        self.sb_speed.setFixedWidth(88)
         self.sb_speed.setToolTip("Tốc độ giọng nói (0.70 chậm – 1.20 nhanh)")
-        opt.addWidget(self.sb_speed)
+        row_speed.addWidget(self.sb_speed)
         self.bt_advanced = QtWidgets.QPushButton("Cài đặt nâng cao")
         self.bt_advanced.setToolTip(
             "Ngắt âm giữa đoạn / silence / gap_every / ngắt theo ký tự"
         )
-        opt.addWidget(self.bt_advanced)
-        opt.addStretch(1)
-        self.lbl_chunk_summary = QtWidgets.QLabel("0 tệp / 0 đoạn")
-        self.lbl_chunk_summary.setObjectName("badge")
-        opt.addWidget(self.lbl_chunk_summary)
+        self.bt_advanced.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed
+        )
+        row_speed.addWidget(self.bt_advanced)
+        row_speed.addStretch(1)
+        opt.addLayout(row_speed)
         source_l.addLayout(opt)
         # Hidden runtime knobs (not shown — admin / fixed)
         self._max_chars = 300
@@ -949,9 +992,18 @@ class PreviewTab(QtWidgets.QWidget):
         chunks_l.addLayout(page_row)
         right.addWidget(chunks_card, 1)
 
-        content.addLayout(left, 38)
-        content.addLayout(right, 62)
-        root.addLayout(content, 1)
+        self._main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._main_splitter.setObjectName("mainSplitter")
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.setHandleWidth(8)
+        self._main_splitter.setOpaqueResize(True)
+        self._main_splitter.addWidget(left_w)
+        self._main_splitter.addWidget(right_w)
+        self._main_splitter.setStretchFactor(0, 38)
+        self._main_splitter.setStretchFactor(1, 62)
+        self._main_splitter.setSizes([420, 680])
+        self._main_splitter.splitterMoved.connect(self._on_splitter_moved)
+        root.addWidget(self._main_splitter, 1)
         self._status = QtWidgets.QLabel("")
         self._status.setObjectName("muted")
         root.addWidget(self._status)
@@ -1074,10 +1126,32 @@ class PreviewTab(QtWidgets.QWidget):
         self.ed_lang.setText(c.get("lang") or "en")
         self._reload_voice_combo(c.get("voice_id"))
         self._reload_voice_table()
+        sizes = c.get("preview_splitter_sizes")
+        if (
+            isinstance(sizes, (list, tuple))
+            and len(sizes) == 2
+            and all(isinstance(x, (int, float)) and int(x) > 0 for x in sizes)
+            and hasattr(self, "_main_splitter")
+        ):
+            self._main_splitter.setSizes([int(sizes[0]), int(sizes[1])])
+
+    def _on_splitter_moved(self, *_args):
+        # Debounce via single-shot timer so drag doesn't thrash disk.
+        if not hasattr(self, "_splitter_save_timer"):
+            self._splitter_save_timer = QtCore.QTimer(self)
+            self._splitter_save_timer.setSingleShot(True)
+            self._splitter_save_timer.setInterval(350)
+            self._splitter_save_timer.timeout.connect(self._persist_cfg)
+        self._splitter_save_timer.start()
 
     def _persist_cfg(self):
         c = self.load_config()
         voices = self._voices_list()
+        splitter_sizes = None
+        if hasattr(self, "_main_splitter"):
+            sizes = self._main_splitter.sizes()
+            if len(sizes) == 2 and all(s > 0 for s in sizes):
+                splitter_sizes = [int(sizes[0]), int(sizes[1])]
         c.update(
             {
                 "output_dir": self.ed_output_dir.text().strip(),
@@ -1092,6 +1166,8 @@ class PreviewTab(QtWidgets.QWidget):
                 "voices": voices,
             }
         )
+        if splitter_sizes:
+            c["preview_splitter_sizes"] = splitter_sizes
         self.save_config(c)
         self._cfg = c
 
