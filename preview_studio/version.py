@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
-"""App version for auto-update checks.
+"""App version + update metadata (values decoded at runtime)."""
+from __future__ import annotations
 
-Bump APP_VERSION when shipping a new Nuitka build (semver).
-Rolling release tag is tracked separately via asset updated_at.
-"""
+import base64
 
-APP_VERSION = "1.0.0"
-APP_NAME = "ElevenLabs Unlimited Studio"
+APP_VERSION = "2.0.0"
+APP_NAME = "TTS Studio"
 
-# GitHub rolling release (CI publishes here)
-GITHUB_OWNER = "huypv2002"
-GITHUB_REPO = "tts-api"
+
+def _d(s: str) -> str:
+    try:
+        return base64.b64decode(s.encode("ascii")).decode("utf-8")
+    except Exception:
+        return ""
+
+
+# Rolling release targets (not shown in UI)
+GITHUB_OWNER = _d("aHV5cHYyMDAy")
+GITHUB_REPO = _d("dHRzLWFwaQ==")
 RELEASE_TAG = "tts-studio-windows-latest"
 ASSET_NAME = "TTS-Studio-Nuitka-windows.zip"
 EXE_NAME = "TTS Studio.exe"

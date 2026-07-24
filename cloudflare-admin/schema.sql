@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   max_chars INTEGER NOT NULL DEFAULT 0,
   -- split mode: line (theo dòng/paragraph) | chars (full max_chars, cắt tại , .)
   split_mode TEXT DEFAULT 'line',
+  -- 1 = mở tab Hội thoại (premium feature flag, admin bật tay)
+  multivoice_enabled INTEGER NOT NULL DEFAULT 0,
   -- proxy gắn account (inline hoặc proxy_id)
   proxy_id TEXT DEFAULT '',
   proxy_provider TEXT DEFAULT 'proxyxoay_net',

@@ -24,18 +24,18 @@ Cần: Python 3.11+, deps trong `requirements.txt` + `nuitka ordered-set zstanda
 
 Hoặc tag `v*`.
 
-## Nội dung ZIP
+## Nội dung ZIP (user-facing)
 
 | File | Mô tả |
 |------|--------|
-| `PreviewStudio.app` (Mac) / `TTS Preview Studio.exe` (Win) | Nuitka build |
-| `silent_*.mp3` | Gap merge 0.5s / 1s / 1.5s |
-| `run-preview-studio.bat` | Launcher Windows |
-| `proxyxoay.example.json` | Mẫu proxy |
-| `HUONG_DAN.txt` | Hướng dẫn nhanh |
+| `TTS Studio.exe` / app | Nuitka standalone |
+| `silent_*.mp3` | Gap merge |
+| `bin/ffmpeg` | Merge audio |
+| `camoufox-browser/` | Runtime bắt buộc |
+| `HUONG_DAN.txt` | Hướng dẫn ngắn (không debug) |
 
-## Lưu ý
+## Lưu ý ship
 
-- **ffmpeg** trên PATH (merge MP3).
-- **Camoufox browser** tải riêng (`camoufox fetch`) — không gói binary browser trong zip.
-- Config / `accounts.json` / `output/` ghi **cạnh** `.app`/`.exe` (không ghi vào trong bundle).
+- **Không** kèm `requirements.txt`, `BUILD_*.md`, `proxyxoay.example.json`, `CHAY-DEBUG.bat`.
+- Console Windows: **disable** (không dump stdout pipeline).
+- Config / `accounts.json` / `output/` ghi **cạnh** EXE (không bundle secrets).

@@ -71,7 +71,7 @@ def _host_of(proxy: Optional[str]) -> str:
 
 
 def _is_hard_401(err: Exception | str) -> bool:
-    """401 / landing / unusual → cần đổi IP (không chỉ soft retry)."""
+    """Hard auth / quota → cần đổi IP (không chỉ soft retry)."""
     m = str(err).lower()
     return (
         "401" in m
@@ -80,6 +80,8 @@ def _is_hard_401(err: Exception | str) -> bool:
         or "landing page" in m
         or "unusual" in m
         or "detected_unusual" in m
+        or "net_limit" in m
+        or "net_auth" in m
     )
 
 
@@ -104,6 +106,16 @@ def _is_retryable(err: Exception | str) -> bool:
             "token-pool",
             "starve",
             "proxyxoay",
+            "net_limit",
+            "net_auth",
+            "net_throttle",
+            "net_captcha",
+            "net_challenge",
+            "net_http",
+            "net_proxy",
+            "net_pause",
+            "net_stale",
+            "net_runtime",
         )
     )
 
@@ -707,7 +719,7 @@ async def run_jobs(
         f"  [pipeline] {len(pending)} đoạn · {total_slots} luồng TTS "
         f"({n_proxies} proxy × [{slot_desc}]) · "
         f"nối đuôi {STAGGER_MIN_S:.0f}–{STAGGER_MAX_S:.0f}s · "
-        f"HSW farm={farm_size} · giữ IP đến 401 · rotate có lock"
+        f"runtime pool={farm_size}"
     )
 
     q: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -860,10 +872,17 @@ async def run_jobs(
                         on_done(row, True, out_path, "")
                     break
                 except Exception as e:
-                    last_err = str(e)[:300]
+                    try:
+                        from user_safe import sanitize_user_error
+
+                        last_err = sanitize_user_error(
+                            e, fallback="Lỗi đoạn — đang thử lại…"
+                        )
+                    except Exception:
+                        last_err = "Lỗi đoạn — đang thử lại…"
                     log(
                         f"  [pipeline] đoạn {row+1} {tag} "
-                        f"lỗi lần {att}: {last_err[:140]}"
+                        f"lỗi lần {att}: {type(e).__name__}"
                     )
                     try:
                         p = Path(out_path)

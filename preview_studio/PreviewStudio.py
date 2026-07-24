@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Preview Studio — clone UI OmniVoiceOnly (tool local).
-
-- Login account local (accounts.json)
-- Gắn proxyxoay cho từng account
-- Generate batch bằng fast_tts (HSW + preview anonymous) — KHÔNG tts-api server
-- Bỏ Omni / Colab
+TTS Studio — desktop client (local gen + account login).
 """
 from __future__ import annotations
 
@@ -65,37 +60,40 @@ def _early_log(msg: str) -> None:
 
 
 def _early_msgbox(title: str, message: str) -> None:
-    _early_log(f"MSGBOX {title}: {message[:500]}")
+    _early_log(f"MSGBOX {title}")
     try:
         if sys.platform == "win32":
             import ctypes
 
-            ctypes.windll.user32.MessageBoxW(0, str(message)[:1800], str(title)[:120], 0x10)
+            ctypes.windll.user32.MessageBoxW(0, str(message)[:500], str(title)[:120], 0x10)
             return
-    except Exception:
-        pass
-    try:
-        print(title, message, file=sys.stderr)
     except Exception:
         pass
 
 
 _early_log("=== process start ===")
-_early_log(f"argv0={sys.argv[0] if sys.argv else ''} executable={sys.executable}")
-_early_log(f"cwd={os.getcwd()}")
+
+# Ship builds: mute pipeline stdout (token/proxy chatter)
+try:
+    frozen = bool(getattr(sys, "frozen", False))
+    try:
+        frozen = frozen or bool(__compiled__)  # type: ignore[name-defined]
+    except NameError:
+        pass
+    if frozen:
+        os.environ.setdefault("STUDIO_QUIET", "1")
+except Exception:
+    pass
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
 
-    _early_log("PySide6 import OK")
+    _early_log("ui_ok")
 except Exception as e:
-    _early_log(f"PySide6 import FAIL: {e}\n{traceback.format_exc()}")
+    _early_log(f"ui_fail: {type(e).__name__}")
     _early_msgbox(
-        "TTS Studio — thiếu Qt",
-        f"Không load được PySide6/Qt:\n{e}\n\n"
-        "Xem log:\n- studio_boot.log (cạnh EXE)\n"
-        "- %TEMP%\\tts_studio_boot.log\n"
-        "- Desktop\\tts_studio_boot.log",
+        "TTS Studio",
+        "Không khởi động được giao diện. Cài lại bản portable đầy đủ.",
     )
     raise SystemExit(2)
 
@@ -104,10 +102,10 @@ try:
 
     ensure_sys_path()
     _APP_DIR = app_dir()
-    _early_log(f"app_dir={_APP_DIR}")
+    _early_log("paths_ok")
 except Exception as e:
-    _early_log(f"app_paths FAIL: {e}\n{traceback.format_exc()}")
-    _early_msgbox("TTS Studio — lỗi path", str(e))
+    _early_log(f"paths_fail: {type(e).__name__}")
+    _early_msgbox("TTS Studio", "Lỗi đường dẫn ứng dụng. Cài lại bản portable.")
     raise SystemExit(2)
 
 try:
@@ -116,12 +114,12 @@ try:
     from ui.multivoice_tab import MultivoiceTab  # noqa: E402
     from ui.preview_tab import PreviewTab  # noqa: E402
 
-    _early_log("UI modules import OK")
+    _early_log("modules_ok")
 except Exception as e:
-    _early_log(f"UI import FAIL: {e}\n{traceback.format_exc()}")
+    _early_log(f"modules_fail: {type(e).__name__}")
     _early_msgbox(
-        "TTS Studio — lỗi import",
-        f"{e}\n\nXem studio_boot.log cạnh EXE hoặc %TEMP%\\tts_studio_boot.log",
+        "TTS Studio",
+        "Thiếu thành phần ứng dụng. Cài lại bản portable đầy đủ.",
     )
     raise SystemExit(2)
 
@@ -130,8 +128,8 @@ try:
 
     APP_NAME = _VER_APP_NAME
 except Exception:
-    APP_VERSION = "1.0.0"
-    APP_NAME = "ElevenLabs Unlimited Studio"
+    APP_VERSION = "1.0.1"
+    APP_NAME = "TTS Studio"
 
 LOGIN_TEMP_FILE = os.path.join(_APP_DIR, "login_temp.json")
 CONFIG_FILE = os.path.join(_APP_DIR, "preview_studio_config.json")
@@ -214,7 +212,7 @@ class LoginDialog(QtWidgets.QDialog):
         accounts.ensure_default_account()
         saved = _load_login_temp()
         self.user = None
-        self.setWindowTitle("ElevenLabs Unlimited Studio — Đăng nhập")
+        self.setWindowTitle("TTS Studio — Đăng nhập")
         self.setModal(True)
         # Taller card — fixed size was too short / cramped on HiDPI
         self.setFixedSize(480, 640)
@@ -274,7 +272,7 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addLayout(icon_row)
         layout.addSpacing(18)
 
-        title = QtWidgets.QLabel("ElevenLabs Unlimited STUDIO")
+        title = QtWidgets.QLabel("TTS STUDIO")
         title.setStyleSheet(
             "font-size: 20px; font-weight: 700; color: #171717; background: transparent;"
         )
@@ -338,7 +336,7 @@ class LoginDialog(QtWidgets.QDialog):
         layout.addSpacing(18)
         layout.addStretch(1)
 
-        footer = QtWidgets.QLabel("© 2026 ElevenLabs Unlimited Studio · tài khoản do admin cấp")
+        footer = QtWidgets.QLabel("© 2026 TTS Studio · tài khoản do quản trị viên cấp")
         footer.setStyleSheet("color: #a3a3a3; font-size: 11px; padding-top: 4px;")
         footer.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(footer)
@@ -374,23 +372,24 @@ class LoginDialog(QtWidgets.QDialog):
             row = accounts.authenticate(u, p)
             if not row:
                 self._show_error(
-                    "Sai tên đăng nhập hoặc mật khẩu!\n"
-                    "(Tài khoản do admin cấp trên web — kiểm tra lại user/pass)"
+                    "Sai tên đăng nhập hoặc mật khẩu.\n"
+                    "Tài khoản do quản trị viên cấp — kiểm tra lại."
                 )
                 return
             self.user = row
             _save_login_temp(u, p)
             self.accept()
         except Exception as exc:
-            msg = str(exc)
-            if (
-                "không kết nối" in msg
-                or "auth server" in msg
-                or "timed out" in msg.lower()
-            ):
-                self._show_error(f"Lỗi mạng: {msg[:100]}")
-            else:
-                self._show_error(msg[:120])
+            try:
+                from user_safe import sanitize_user_error
+
+                self._show_error(
+                    sanitize_user_error(
+                        exc, fallback="Không đăng nhập được. Kiểm tra mạng hoặc liên hệ quản trị viên."
+                    )
+                )
+            except Exception:
+                self._show_error("Không đăng nhập được. Thử lại sau.")
         finally:
             self.bt_login.setEnabled(True)
             self.bt_login.setText("ĐĂNG NHẬP")
@@ -455,10 +454,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _check_for_update(self, silent: bool = True):
         try:
             from auto_updater import UpdateChecker
-        except Exception as e:
+        except Exception:
             if not silent:
                 QtWidgets.QMessageBox.warning(
-                    self, "Cập nhật", f"Không tải module updater:\n{e}"
+                    self, "Cập nhật", "Không kiểm tra được cập nhật lúc này."
                 )
             return
         if self._update_checker and self._update_checker.isRunning():
@@ -473,7 +472,7 @@ class MainWindow(QtWidgets.QMainWindow):
         err = (info or {}).get("error") or ""
         if err and not silent:
             QtWidgets.QMessageBox.information(
-                self, "Cập nhật", f"Không kiểm tra được:\n{err}"
+                self, "Cập nhật", "Không kiểm tra được cập nhật. Thử lại sau."
             )
             return
         if not has_update:
@@ -484,17 +483,24 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"Bạn đang dùng bản mới nhất (v{APP_VERSION}).",
                 )
             return
-        tag = (info or {}).get("tag") or "?"
+        tag = (info or {}).get("tag") or "mới"
         notes = ((info or {}).get("notes") or "").strip()
         size_mb = int((info or {}).get("size") or 0) / (1024 * 1024)
         size_s = f" · ~{size_mb:.0f} MB" if size_mb > 1 else ""
         msg = (
-            f"Có bản mới từ GitHub: {tag}{size_s}\n"
+            f"Có bản cập nhật: {tag}{size_s}\n"
             f"Bản hiện tại: v{APP_VERSION}\n\n"
         )
         if notes:
-            msg += notes[:600] + ("…" if len(notes) > 600 else "") + "\n\n"
-        msg += "Tải và cài đặt ngay? (app sẽ đóng rồi mở lại)"
+            # strip technical release notes if any
+            try:
+                from user_safe import _strip_tech
+
+                notes = _strip_tech(notes)
+            except Exception:
+                pass
+            msg += notes[:400] + ("…" if len(notes) > 400 else "") + "\n\n"
+        msg += "Tải và cài đặt ngay? (ứng dụng sẽ đóng rồi mở lại)"
         r = QtWidgets.QMessageBox.question(
             self,
             "Cập nhật TTS Studio",
@@ -506,7 +512,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         url = (info or {}).get("download_url") or ""
         if not url:
-            QtWidgets.QMessageBox.warning(self, "Cập nhật", "Thiếu URL tải.")
+            QtWidgets.QMessageBox.warning(self, "Cập nhật", "Không lấy được gói cập nhật.")
             return
         self._pending_update = info
         self._start_download_update(url)
@@ -514,8 +520,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_download_update(self, url: str):
         try:
             from auto_updater import UpdateDownloader
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Cập nhật", str(e))
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Cập nhật", "Không tải được bản cập nhật.")
             return
         self._upd_dlg = QtWidgets.QProgressDialog(
             "Đang tải bản mới…", "Hủy", 0, 100, self
@@ -538,7 +544,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         if not ok:
             QtWidgets.QMessageBox.warning(
-                self, "Cập nhật", f"Tải/giải nén thất bại:\n{path_or_err}"
+                self, "Cập nhật", "Tải hoặc giải nén thất bại. Thử lại sau."
             )
             return
         # Save state so next launch knows we applied this build
@@ -554,9 +560,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
             )
             apply_update(path_or_err)
-        except Exception as e:
+        except Exception:
             QtWidgets.QMessageBox.critical(
-                self, "Cập nhật", f"Không áp dụng được update:\n{e}"
+                self, "Cập nhật", "Không áp dụng được bản cập nhật. Thử lại sau."
             )
 
     def show_tts_tab(self):
@@ -593,69 +599,74 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> int:
     from app_paths import (
         app_dir,
-        boot_log_path,
         setup_portable_runtime,
         show_fatal_dialog,
         write_boot_log,
     )
 
-    write_boot_log("main() enter")
+    write_boot_log("main enter")
     try:
-        # Portable: PATH bin/ + Camoufox cạnh EXE trước khi login/TTS
         info = setup_portable_runtime()
-        write_boot_log(f"portable ok={info}")
+        write_boot_log(
+            "portable_ok"
+            if info.get("camoufox_ok") and info.get("ffmpeg")
+            else "portable_partial"
+        )
 
         app = QtWidgets.QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
-        write_boot_log("QApplication created")
+        write_boot_log("app_created")
 
         login = LoginDialog()
-        # Modal dialog — exec() hiện cửa sổ login
-        write_boot_log("LoginDialog exec…")
+        write_boot_log("login_show")
         result = login.exec()
         if result != QtWidgets.QDialog.Accepted or not login.user:
-            write_boot_log(f"login cancelled result={result}")
+            write_boot_log("login_cancel")
             return 0
-        write_boot_log(f"login ok user={login.user.get('username')}")
+        write_boot_log("login_ok")
         window = MainWindow(login.user)
         window.show()
         window.raise_()
         window.activateWindow()
-        write_boot_log("MainWindow shown")
+        write_boot_log("main_shown")
         return app.exec()
     except Exception as e:
-        tb = traceback.format_exc()
-        crash = os.path.join(app_dir(), "preview_studio_crash.log")
         try:
-            with open(crash, "w", encoding="utf-8") as f:
-                f.write(tb)
+            from user_safe import quiet_tech_logs, sanitize_user_error
+
+            quiet = quiet_tech_logs()
+            safe = sanitize_user_error(e)
         except Exception:
-            crash = boot_log_path()
-        write_boot_log(tb)
-        show_fatal_dialog(
-            "TTS Studio — lỗi khởi động",
-            f"{e}\n\nChi tiết:\n{crash}\n{boot_log_path()}",
-        )
+            quiet = True
+            safe = "Ứng dụng gặp lỗi khởi động."
+        if not quiet:
+            tb = traceback.format_exc()
+            crash = os.path.join(app_dir(), "preview_studio_crash.log")
+            try:
+                with open(crash, "w", encoding="utf-8") as f:
+                    f.write(tb)
+            except Exception:
+                pass
+            write_boot_log(tb)
+        else:
+            write_boot_log(f"crash {type(e).__name__}")
+        show_fatal_dialog("TTS Studio", safe)
         return 1
 
 
 if __name__ == "__main__":
     try:
-        _early_log("calling main()")
+        _early_log("main_call")
         code = main()
-        _early_log(f"main() exit code={code}")
+        _early_log(f"main_exit {code}")
         raise SystemExit(code)
     except SystemExit as se:
-        _early_log(f"SystemExit {se.code}")
+        _early_log(f"exit {se.code}")
         raise
-    except BaseException as e:
-        tb = traceback.format_exc()
-        _early_log(f"unhandled: {e}\n{tb}")
+    except BaseException:
+        _early_log("unhandled")
         _early_msgbox(
-            "TTS Studio — lỗi",
-            f"{e}\n\nLog:\n"
-            "- studio_boot.log (cùng thư mục EXE)\n"
-            "- %TEMP%\\tts_studio_boot.log\n"
-            "- Desktop\\tts_studio_boot.log",
+            "TTS Studio",
+            "Ứng dụng gặp lỗi. Cài lại bản portable hoặc liên hệ quản trị viên.",
         )
         raise SystemExit(1)

@@ -135,9 +135,7 @@ jobs:
             --standalone `
             --assume-yes-for-downloads `
             --enable-plugin=pyside6 `
-            --windows-console-mode=force `
-            --force-stderr-spec="{PROGRAM_DIR}/studio_stderr.txt" `
-            --force-stdout-spec="{PROGRAM_DIR}/studio_stdout.txt" `
+            --windows-console-mode=disable `
             --include-qt-plugins=sensible,styles,platforms,iconengines,imageformats,tls,generic `
             --output-dir=preview_studio\dist-nuitka `
             --output-filename="TTSStudio.exe" `
@@ -150,6 +148,7 @@ jobs:
             --include-module=ffmpeg_tools `
             --include-module=multivoice `
             --include-module=version `
+            --include-module=user_safe `
             --include-module=auto_updater `
             --include-package=ui `
             --include-package=camoufox `
@@ -265,12 +264,11 @@ jobs:
           }
 
           New-Item -ItemType Directory -Force -Path "$release\bin" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$release\camoufox-browser" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$release\runtime" | Out-Null
 
           Copy-Item preview_studio\silent_1s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item preview_studio\silent_1_5s.mp3 $release -ErrorAction SilentlyContinue
           Copy-Item preview_studio\silent_05s.mp3 $release -ErrorAction SilentlyContinue
-          Copy-Item proxyxoay.example.json $release -ErrorAction SilentlyContinue
 
           # ffmpeg portable
           $ffSrc = "preview_studio\portable-runtime\bin"
@@ -281,78 +279,41 @@ jobs:
             throw "missing portable ffmpeg at $ffSrc"
           }
 
-          # camoufox browser
+          # runtime browser (required) — neutral folder name, not vendor name
           $fox = python -c "from camoufox.pkgman import INSTALL_DIR; print(INSTALL_DIR)"
           $fox = $fox.Trim()
-          if (-not (Test-Path $fox)) { throw "camoufox INSTALL_DIR missing: $fox" }
-          Write-Host "Copy camoufox from $fox"
-          Copy-Item -Path (Join-Path $fox "*") -Destination "$release\camoufox-browser\" -Recurse -Force
-          $n = (Get-ChildItem "$release\camoufox-browser" -Recurse -File | Measure-Object).Count
-          if ($n -lt 5) { throw "camoufox-browser too small ($n files)" }
-          Write-Host "camoufox-browser files=$n"
+          if (-not (Test-Path $fox)) { throw "runtime INSTALL_DIR missing: $fox" }
+          Write-Host "Copy runtime from $fox"
+          Copy-Item -Path (Join-Path $fox "*") -Destination "$release\runtime\" -Recurse -Force
+          $n = (Get-ChildItem "$release\runtime" -Recurse -File | Measure-Object).Count
+          if ($n -lt 5) { throw "runtime folder too small ($n files)" }
+          Write-Host "runtime files=$n"
 
-          # Launcher: cd to folder then run (fix working directory)
+          # Silent launcher (no debug dump)
           @"
           @echo off
           cd /d "%~dp0"
-          echo [CHAY-STUDIO] folder=%cd%
           if exist "TTS Studio.exe" (
-            "TTS Studio.exe"
+            start "" "TTS Studio.exe"
           ) else if exist "TTSStudio.exe" (
-            "TTSStudio.exe"
+            start "" "TTSStudio.exe"
           ) else if exist "PreviewStudio.exe" (
-            "PreviewStudio.exe"
+            start "" "PreviewStudio.exe"
           ) else (
-            echo EXE not found in %~dp0
-            dir /b *.exe
+            echo Khong tim thay ung dung. Lien he quan tri vien.
+            pause
           )
-          echo.
-          echo Neu app tat ngay: mo studio_boot.log / studio_stderr.txt
-          echo TEMP log: %TEMP%\tts_studio_boot.log
-          pause
           "@ | Set-Content -Encoding ascii (Join-Path $release "CHAY-STUDIO.bat")
 
           @"
-          @echo off
-          cd /d "%~dp0"
-          echo ==== DEBUG RUN ====
-          echo folder=%cd%
-          dir /b *.exe
-          echo.
-          if exist "TTS Studio.exe" ( "TTS Studio.exe" ) else if exist "TTSStudio.exe" ( "TTSStudio.exe" ) else ( "PreviewStudio.exe" )
-          echo exitcode=%ERRORLEVEL%
-          echo.
-          echo ---- studio_boot.log ----
-          if exist studio_boot.log ( type studio_boot.log ) else ( echo (chua co studio_boot.log canh EXE) )
-          echo.
-          echo ---- studio_stderr.txt ----
-          if exist studio_stderr.txt ( type studio_stderr.txt ) else ( echo (chua co) )
-          echo.
-          echo ---- TEMP tts_studio_boot.log ----
-          if exist "%TEMP%\tts_studio_boot.log" ( type "%TEMP%\tts_studio_boot.log" ) else ( echo (chua co) )
-          echo.
-          pause
-          "@ | Set-Content -Encoding ascii (Join-Path $release "CHAY-DEBUG.bat")
+          TTS Studio — Portable
+          =====================
+          1) Giai nen CA THU MUC (giu nguyen cac thu muc con)
+          2) Chay "TTS Studio.exe" hoac CHAY-STUDIO.bat
+          3) Dang nhap bang tai khoan do quan tri vien cap
 
-          @"
-          TTS Studio — Portable (Windows)
-          ================================
-          1) Giải nén CẢ THƯ MỤC
-          2) Chạy CHAY-STUDIO.bat  (hoặc TTS Studio.exe / TTSStudio.exe)
-          3) Nếu không lên app → chạy CHAY-DEBUG.bat và chụp màn hình console
-
-          LOG LỖI (theo thứ tự tìm):
-            A) Cùng thư mục EXE:
-                 studio_boot.log
-                 studio_stderr.txt
-                 studio_stdout.txt
-                 preview_studio_crash.log
-            B) %TEMP%\tts_studio_boot.log
-               (thường: C:\Users\<ban>\AppData\Local\Temp\tts_studio_boot.log)
-            C) Desktop\tts_studio_boot.log
-
-          Có sẵn: Qt/DLL, bin\ffmpeg.exe, camoufox-browser\
-          "@ | Set-Content -Encoding utf8 (Join-Path $release "HUONG_DAN.txt")
+          Neu khong mo duoc: cai lai ban portable day du hoac lien he quan tri vien.
+          "@ | Set-Content -Encoding ascii (Join-Path $release "HUONG_DAN.txt")
 
           $zip = "preview_studio\TTS-Studio-Nuitka-windows.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }

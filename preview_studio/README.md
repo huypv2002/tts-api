@@ -1,33 +1,23 @@
-# ElevenLabs Unlimited Studio (desktop tool LOCAL)
+# TTS Studio (desktop tool LOCAL)
 
-GUI desktop — **generate TTS local** (`fast_tts`).
+GUI desktop — generate TTS local.
 
-## Phân tách (BẮT BUỘC)
+## Login
 
-| Lớp | Nơi | Việc |
-|-----|-----|------|
-| **Tool local** | `preview_studio/` | Login local, generate MP3 trên máy |
-| **Web admin** | `cloudflare-admin/` (Workers + **D1**) | Account, gói ký tự, proxy, max luồng |
-| **Windows server** | `tts-api/` (optional) | Chỉ worker TTS nặng nếu scale — **không** là admin DB |
-
-Xem `../ARCHITECTURE.md`.
-
-## Login tool
-
-Chỉ **username + password** (không endpoint).
-
-Default: `admin` / `admin123`
+Chỉ **username + password**. Tài khoản do quản trị viên cấp.
 
 ## Generate
 
-- Gắn proxy trên account local (⚙) **hoặc** dùng proxy đã cấu hình khi chạy local
-- TXT / folder / SRT → chunk → fast_tts → MP3
+- Đường truyền / gói ký tự do admin cấp
+- TXT / folder / SRT / hội thoại → MP3
 - Max **5 luồng**
 
-## Chạy
+## Chạy (dev)
 
 ```bash
 cd preview_studio
 pip3 install -r requirements.txt
 python3 PreviewStudio.py
 ```
+
+Ship: Nuitka standalone + runtime folders (xem `BUILD_NUITKA.md`).

@@ -29,12 +29,12 @@ from output_layout import (
 
 DEFAULT_VOICE = "NOpBlnGInO9m6vDvFkFC"
 DEFAULT_MODEL = "eleven_v3"
-# model_id, nhãn UI (user chọn)
+# model_id internal, nhãn UI thân thiện (không lộ id kỹ thuật)
 MODEL_CHOICES = [
-    ("eleven_v3", "eleven_v3 — chất lượng / cảm xúc"),
-    ("eleven_turbo_v2_5", "eleven_turbo_v2_5 — cân bằng"),
-    ("eleven_flash_v2_5", "eleven_flash_v2_5 — nhanh + hỗ trợ vi"),
-    ("eleven_multilingual_v2", "eleven_multilingual_v2 — đa ngôn ngữ"),
+    ("eleven_v3", "Chất lượng cao · cảm xúc"),
+    ("eleven_turbo_v2_5", "Cân bằng · nhanh"),
+    ("eleven_flash_v2_5", "Siêu nhanh · đa ngôn ngữ"),
+    ("eleven_multilingual_v2", "Đa ngôn ngữ"),
 ]
 CHUNK_PAGE_SIZE = 40  # rows per page — tránh lag UI
 PREVIEW_TEXT_MAX = 80_000  # chars in preview box (có scroll)
@@ -194,7 +194,12 @@ class VoiceFetchWorker(QThread):
         try:
             self.done.emit(fetch_voice_info(self.voice_id))
         except Exception as e:
-            self.failed.emit(str(e))
+            try:
+                from user_safe import sanitize_user_error
+
+                self.failed.emit(sanitize_user_error(e))
+            except Exception:
+                self.failed.emit("Lỗi tải dữ liệu.")
 
 
 class LoadFilesWorker(QThread):
@@ -271,7 +276,12 @@ class LoadFilesWorker(QThread):
                     ch["path"] = op
             self.done.emit(sources, chunks)
         except Exception as e:
-            self.failed.emit(str(e))
+            try:
+                from user_safe import sanitize_user_error
+
+                self.failed.emit(sanitize_user_error(e))
+            except Exception:
+                self.failed.emit("Lỗi tải dữ liệu.")
 
 
 class BatchWorker(QThread):
@@ -384,6 +394,12 @@ class BatchWorker(QThread):
             )
 
         def on_status(row: int, status: str):
+            try:
+                from user_safe import sanitize_status
+
+                status = sanitize_status(status)
+            except Exception:
+                pass
             self.row_status.emit(row, status)
 
         def file_complete(fname: str) -> tuple[bool, int, int, list[str]]:
@@ -455,9 +471,15 @@ class BatchWorker(QThread):
                 )
             else:
                 self.row_status.emit(row, "Chờ thử lại…" if not self._stop else "Lỗi")
-                self.row_done.emit(row, False, "", err)
+                try:
+                    from user_safe import sanitize_user_error
+
+                    err_ui = sanitize_user_error(err)
+                except Exception:
+                    err_ui = "Lỗi đoạn — đang thử lại…"
+                self.row_done.emit(row, False, "", err_ui)
                 self.log.emit(
-                    f"❌ {fname} doan_{ch.get('part') or row+1}: {err}"
+                    f"❌ {fname} doan_{ch.get('part') or row+1}: {err_ui}"
                 )
             # progress theo file thật trên disk
             disk_ok = sum(
@@ -476,11 +498,19 @@ class BatchWorker(QThread):
                 for outer in range(1, OUTER_ROUNDS + 1):
                     if self._stop:
                         break
-                    pending = [
-                        dict(j)
-                        for j in all_jobs
-                        if not self._good_mp3(j.get("out_path") or "")
-                    ]
+                    # Skip disk-cache: báo UI "Xong" (không on_done → tránh trừ ký tự 2 lần)
+                    pending = []
+                    cached_n = 0
+                    for j in all_jobs:
+                        outp = j.get("out_path") or ""
+                        if self._good_mp3(outp):
+                            cached_n += 1
+                            row = int(j.get("row") or 0)
+                            if 0 <= row < len(self.chunks):
+                                self.chunks[row]["path"] = outp
+                            self.row_status.emit(row, "Xong")
+                        else:
+                            pending.append(dict(j))
                     # purge tiny broken files
                     for j in pending:
                         p = j.get("out_path") or ""
@@ -494,7 +524,8 @@ class BatchWorker(QThread):
                         break
                     self.log.emit(
                         f"── Vòng {outer}/{OUTER_ROUNDS}: "
-                        f"còn {len(pending)}/{total} đoạn · {n_workers} luồng ──"
+                        f"còn {len(pending)}/{total} đoạn"
+                        f"{f' · cache {cached_n}' if cached_n else ''} · {n_workers} luồng ──"
                     )
                     done_n = total - len(pending)  # baseline for this pass UI
                     o_ok, o_fail = await run_jobs(
@@ -556,7 +587,14 @@ class BatchWorker(QThread):
             else:
                 self.log.emit(f"✅ KẾT THÚC: đủ {disk_ok}/{total} đoạn trên disk.")
         except Exception as e:
-            self.log.emit(f"❌ Lỗi hệ thống: {e}")
+            try:
+                from user_safe import sanitize_user_error
+
+                self.log.emit(
+                    f"❌ Lỗi hệ thống: {sanitize_user_error(e, fallback='Lỗi tạo audio. Thử lại.')}"
+                )
+            except Exception:
+                self.log.emit("❌ Lỗi hệ thống. Thử lại sau.")
             ok, fail = 0, total
         self.finished.emit(ok, fail)
 
@@ -699,9 +737,8 @@ class PreviewTab(QtWidgets.QWidget):
         sl.addWidget(self.lbl_login_status)
 
         tip = QtWidgets.QLabel(
-            "Proxy, gói ký tự và số luồng do admin cấp trên web.\n"
-            "Tool chỉ chọn giọng đọc và cài đặt tạo audio (tự lưu).\n"
-            "Trang quản trị: https://tts-origin.liveyt.pro/admin/"
+            "Đường truyền, gói ký tự và số luồng do quản trị viên cấp.\n"
+            "Bạn chỉ chọn giọng đọc và cài đặt tạo audio (tự lưu)."
         )
         tip.setObjectName("muted")
         tip.setWordWrap(True)
@@ -737,7 +774,7 @@ class PreviewTab(QtWidgets.QWidget):
         self.ed_v_lang.setMaximumWidth(72)
         self.bt_voice_fetch = QtWidgets.QPushButton("Lấy thông tin")
         self.bt_voice_fetch.setToolTip(
-            "Lấy tên, ngôn ngữ, mô tả giọng từ thư viện ElevenLabs (public API)"
+            "Lấy tên, ngôn ngữ, mô tả giọng từ thư viện công khai"
         )
         vf.addWidget(QtWidgets.QLabel("Mã giọng"), 0, 0)
         vf.addWidget(self.ed_v_id, 0, 1, 1, 2)
@@ -848,9 +885,10 @@ class PreviewTab(QtWidgets.QWidget):
         for mid, label in MODEL_CHOICES:
             self.cb_model.addItem(label, mid)
         self.cb_model.setToolTip(
-            "Model ElevenLabs (anonymous).\n"
-            "• v3 / turbo_v2_5 / flash_v2_5: gửi language_code từ giọng đã lưu\n"
-            "• multilingual_v2: không ép language_code (tránh 400 với vi)"
+            "Chọn kiểu giọng đọc:\n"
+            "• Chất lượng cao — hay nhất, cảm xúc tốt\n"
+            "• Cân bằng / Siêu nhanh — gen nhanh hơn\n"
+            "• Đa ngôn ngữ — hỗ trợ nhiều ngôn ngữ"
         )
         row_model.addWidget(self.cb_model, 1)
         self.lbl_chunk_summary = QtWidgets.QLabel("0 tệp / 0 đoạn")
@@ -1321,6 +1359,12 @@ class PreviewTab(QtWidgets.QWidget):
     def _on_voice_fetch_failed(self, err: str):
         self._last_voice_meta = None
         self.lbl_voice_info.setText("")
+        try:
+            from user_safe import sanitize_user_error
+
+            err = sanitize_user_error(err, fallback="Không lấy được thông tin giọng.")
+        except Exception:
+            err = "Không lấy được thông tin giọng."
         self.lbl_settings_msg.setText(f"❌ {err}")
 
     def _voice_add(self):
@@ -1440,6 +1484,15 @@ class PreviewTab(QtWidgets.QWidget):
         )
 
     def _set_status(self, text: str):
+        try:
+            from user_safe import sanitize_log_line
+
+            text = sanitize_log_line(text or "") or (text or "")
+            # Drop pure-tech empty after sanitize in ship mode
+            if not text.strip():
+                return
+        except Exception:
+            pass
         self._status.setText(text)
 
     def _pick_txt(self):
@@ -1507,10 +1560,33 @@ class PreviewTab(QtWidgets.QWidget):
         w.failed.connect(self._on_files_load_failed)
         w.start()
 
+    def _sync_chunk_status_from_disk(self) -> int:
+        """Gắn status Xong nếu mp3 đã có trên disk. Trả về số đoạn cache."""
+        if not isinstance(getattr(self, "_chunk_status", None), dict):
+            self._chunk_status = {}
+        n_ok = 0
+        for i, ch in enumerate(self._chunks):
+            p = (ch.get("out_path") or ch.get("path") or "").strip()
+            try:
+                good = bool(p) and os.path.isfile(p) and os.path.getsize(p) > 500
+            except Exception:
+                good = False
+            if good:
+                self._chunk_status[i] = "Xong"
+                ch["path"] = p
+                n_ok += 1
+            else:
+                # giữ status đang chạy / lỗi nếu có; còn lại = Chờ
+                cur = str(self._chunk_status.get(i) or "").strip()
+                if not cur or cur == "Xong":
+                    self._chunk_status[i] = "Chờ"
+        return n_ok
+
     def _on_files_loaded(self, sources: object, chunks: object):
         self._sources = list(sources or [])
         self._chunks = list(chunks or [])
-        self._chunk_status = {i: "Chờ" for i in range(len(self._chunks))}
+        self._chunk_status = {}
+        n_cached = self._sync_chunk_status_from_disk()
         self._chunk_page = 0
         # preview text with scroll (cap size)
         parts = []
@@ -1535,15 +1611,22 @@ class PreviewTab(QtWidgets.QWidget):
         self._render_chunk_page()
         self.bt_start.setEnabled(True)
         out_root = self.ed_output_dir.text().strip() or "output"
+        extra = f" · đã có {n_cached} đoạn trên disk" if n_cached else ""
         self._set_status(
-            f"Sẵn sàng · {len(self._sources)} tệp · {len(self._chunks)} đoạn "
-            f"· layout {{output}}/{{stem}}/doan_N.mp3 · {out_root}"
+            f"Sẵn sàng · {len(self._sources)} tệp · {len(self._chunks)} đoạn"
+            f"{extra} · {out_root}"
         )
         self._persist_cfg()
 
     def _on_files_load_failed(self, err: str):
         self.bt_start.setEnabled(True)
         self.ed_text.setPlainText("")
+        try:
+            from user_safe import sanitize_user_error
+
+            err = sanitize_user_error(err, fallback="Không đọc được tệp.")
+        except Exception:
+            err = "Không đọc được tệp."
         self._set_status(f"Lỗi khi tải tệp: {err}")
 
     def _total_chunk_pages(self) -> int:
@@ -1602,11 +1685,18 @@ class PreviewTab(QtWidgets.QWidget):
             )
             size = "—"
             p = ch.get("path") or ch.get("out_path")
+            on_disk = False
             if p and os.path.exists(p) and os.path.getsize(p) > 500:
+                on_disk = True
                 try:
                     size = f"{os.path.getsize(p) // 1024} KB"
                 except Exception:
                     size = "đã có"
+            # Disk truth > stale dict: có file rồi mà còn "Chờ" → Xong
+            st_l0 = str(st or "").lower().strip()
+            if on_disk and st_l0 in ("", "chờ", "cho"):
+                st = "Xong"
+                self._chunk_status[abs_i] = "Xong"
             self.tbl_sub.setItem(local, 2, QtWidgets.QTableWidgetItem(size))
             # Ký tự = plain content (không tính thẻ <break>); tooltip = payload API
             try:
@@ -1794,10 +1884,9 @@ class PreviewTab(QtWidgets.QWidget):
         if not proxy:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Thiếu proxy",
-                "Tài khoản chưa được admin gắn proxy.\n"
-                "Liên hệ admin cấp proxy tại:\n"
-                "https://tts-origin.liveyt.pro/admin/",
+                "Thiếu kết nối",
+                "Tài khoản chưa được cấp đường truyền.\n"
+                "Liên hệ quản trị viên để kích hoạt.",
             )
             return
         total_chars = sum(len(c.get("text") or "") for c in self._chunks)
@@ -1811,10 +1900,9 @@ class PreviewTab(QtWidgets.QWidget):
         if not proxy_lines:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Thiếu proxy",
-                "Không có proxy enabled trong pool.\n"
-                "Admin thêm proxy (proxyxoay.net hoặc proxyxoay.shop) tại:\n"
-                "https://tts-origin.liveyt.pro/admin/",
+                "Thiếu kết nối",
+                "Không có đường truyền khả dụng cho tài khoản này.\n"
+                "Liên hệ quản trị viên.",
             )
             return
         workers = mw  # 1 proxy + max_workers=3 → 3 luồng TTS
@@ -1829,17 +1917,23 @@ class PreviewTab(QtWidgets.QWidget):
         self.bt_start.setEnabled(False)
         self.bt_stop.setEnabled(True)
         self.progress.setValue(0)
-        self.lbl_result.setText(f"Kết quả: 0/{len(self._chunks)}")
-        self._chunk_status = {i: "Chờ" for i in range(len(self._chunks))}
+        # Status từ disk trước (không reset mù về "Chờ" khi đã có mp3)
+        self._chunk_status = {}
+        n_cached = self._sync_chunk_status_from_disk()
         self._chunk_page = 0
-        # reset queue % (chỉ đếm lại từ 0 khi gen mới; skip-on-disk vẫn cập nhật sau)
+        self.lbl_result.setText(
+            f"Kết quả: {n_cached}/{len(self._chunks)}"
+            if n_cached
+            else f"Kết quả: 0/{len(self._chunks)}"
+        )
+        # Hàng đợi: rebuild đếm lại % theo file đã có trên disk
         self._file_done = {fn: 0 for fn in (getattr(self, "_file_total", {}) or {})}
         self._rebuild_queue_table()
-        # zero done for fresh run display (rebuild counted existing files)
-        for fn in list(self._file_done.keys()):
-            # keep pre-existing as progress so skip looks correct
-            pass
         self._render_chunk_page()
+        if n_cached:
+            self._set_status(
+                f"Bắt đầu · bỏ qua {n_cached}/{len(self._chunks)} đoạn đã có trên disk"
+            )
         px_key = self.user.get("proxy_api_key") or ""
         if not px_key and proxy_lines:
             px_key = proxy_lines[0].get("api_key") or ""
@@ -1919,25 +2013,30 @@ class PreviewTab(QtWidgets.QWidget):
             fname = self._chunks[row].get("file") or ""
             if ok:
                 self._chunks[row]["path"] = path
-                # trừ gói theo nội dung plain (không tính thẻ <break>)
-                ch = self._chunks[row]
-                try:
-                    from output_layout import plain_char_count
+                already = str(self._chunk_status.get(row) or "").lower() == "xong"
+                # Chỉ trừ ký tự khi gen mới (không trừ lại cache skip / retry xong)
+                if not already:
+                    ch = self._chunks[row]
+                    try:
+                        from output_layout import plain_char_count
 
-                    n = int(ch.get("plain_chars") or plain_char_count(ch.get("text") or ""))
-                except Exception:
-                    n = len(ch.get("text") or "")
-                try:
-                    accounts.consume_chars(self.user.get("id") or "", n)
-                    full = accounts.get_account(self.user.get("id") or "")
-                    if full:
-                        self.user = full
-                        self._refresh_account_badge()
-                except Exception:
-                    pass
+                        n = int(
+                            ch.get("plain_chars")
+                            or plain_char_count(ch.get("text") or "")
+                        )
+                    except Exception:
+                        n = len(ch.get("text") or "")
+                    try:
+                        accounts.consume_chars(self.user.get("id") or "", n)
+                        full = accounts.get_account(self.user.get("id") or "")
+                        if full:
+                            self.user = full
+                            self._refresh_account_badge()
+                    except Exception:
+                        pass
+                    self._gen_ok = int(getattr(self, "_gen_ok", 0) or 0) + 1
+                    self._bump_queue_file(fname, ok=True)
                 self._set_chunk_status(row, "Xong")
-                self._bump_queue_file(fname, ok=True)
-                self._gen_ok = int(getattr(self, "_gen_ok", 0) or 0) + 1
                 # refresh size cell if visible
                 start = self._chunk_page * CHUNK_PAGE_SIZE
                 if start <= row < start + CHUNK_PAGE_SIZE:

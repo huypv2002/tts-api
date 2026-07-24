@@ -155,6 +155,29 @@ ELEVENLABS_HEADERS = {
 
 
 def log(msg: str) -> None:
+    """Pipeline chatter — silent when shipped (frozen) or STUDIO_QUIET=1."""
+    try:
+        # Prefer studio helper when available (Preview Studio on PYTHONPATH)
+        from user_safe import quiet_tech_logs  # type: ignore
+
+        if quiet_tech_logs():
+            return
+    except Exception:
+        q = (os.environ.get("STUDIO_QUIET") or "").strip().lower()
+        if q in ("1", "true", "yes", "on"):
+            return
+        try:
+            import sys
+
+            if getattr(sys, "frozen", False):
+                return
+        except Exception:
+            pass
+        try:
+            if bool(__compiled__):  # type: ignore[name-defined]
+                return
+        except NameError:
+            pass
     print(msg, flush=True)
 
 
@@ -219,7 +242,7 @@ def get_hcaptcha_materials(proxy_http: str | None) -> tuple[str, str, dict]:
     ).json()
 
     if "c" not in config or "req" not in config.get("c", {}):
-        raise RuntimeError(f"checksiteconfig failed: {json.dumps(config)[:200]}")
+        raise RuntimeError("NET_CAPTCHA: materials failed")
 
     log(f"  [1/4] materials OK version={version} ({time.time()-t0:.1f}s)")
     return config["c"]["req"], version, config
@@ -234,7 +257,7 @@ def _fetch_hsw_js(req_token: str, proxy_http: str | None) -> tuple[str, str]:
     hsw_url = "https://newassets.hcaptcha.com" + cache_key + "/hsw.js"
     hsw_js = session.get(hsw_url).text
     if not hsw_js or "function" not in hsw_js:
-        raise RuntimeError("hsw.js fetch invalid")
+        raise RuntimeError("NET_CAPTCHA: solver asset invalid")
     _hsw_js_cache[cache_key] = hsw_js
     return cache_key, hsw_js
 
@@ -297,20 +320,16 @@ class HswFarm:
     async def _launch(self, browser_proxy: str | None) -> None:
         t0 = time.time()
         if AsyncCamoufox is None or not callable(AsyncCamoufox):
-            raise RuntimeError(
-                "Package camoufox chưa được đóng gói vào EXE. "
-                "Cần bản build có --include-package=camoufox."
-            )
-        # Portable: trỏ Camoufox vào camoufox-browser/ cạnh EXE (hoặc auto-fetch)
+            raise RuntimeError("NET_RUNTIME: missing packaged browser engine")
+        # Portable: trỏ browser runtime cạnh EXE (hoặc auto-fetch)
         try:
             from app_paths import ensure_camoufox_browser, setup_portable_runtime
 
             setup_portable_runtime()
             fox_dir = await asyncio.to_thread(ensure_camoufox_browser, True)
-            log(f"  [hsw-farm] camoufox dir={fox_dir}")
+            log(f"  [runtime] browser dir ok")
         except Exception as e:
-            log(f"  [hsw-farm] camoufox setup warn: {e}")
-            # nếu chỉ thiếu browser folder nhưng package OK — vẫn thử launch (camoufox tự fetch)
+            log(f"  [runtime] browser setup warn")
         opts: dict = {
             "headless": True,
             "os": "windows",
@@ -321,10 +340,7 @@ class HswFarm:
         try:
             cm = AsyncCamoufox(**opts)
         except TypeError:
-            # fallback nếu AsyncCamoufox bị gán stub
-            raise RuntimeError(
-                "Không khởi tạo được Camoufox. Kiểm tra package + folder camoufox-browser/."
-            ) from None
+            raise RuntimeError("NET_RUNTIME: cannot start browser engine") from None
         self._cm = cm
         if hasattr(cm, "start"):
             self._browser = await cm.start()
@@ -383,7 +399,7 @@ class HswFarm:
         if not injected:
             await slot.page.evaluate(hsw_js)
             if not await slot.page.evaluate("typeof hsw === 'function'"):
-                raise RuntimeError("hsw function not available after inject")
+                raise RuntimeError("NET_CAPTCHA: solver not ready")
         slot.js_key = cache_key
 
     async def _inject(self, slot: _HswPage, hsw_js: str, cache_key: str) -> None:
@@ -438,7 +454,7 @@ class HswFarm:
                         await self._inject(slot, hsw_js, cache_key)
                     result = await slot.page.evaluate("(req) => hsw(req)", req_token)
                     if not result:
-                        raise RuntimeError("hsw() returned empty")
+                        raise RuntimeError("NET_CAPTCHA: solver empty")
                 except Exception as e:
                     msg = str(e).lower()
                     if any(
@@ -460,7 +476,7 @@ class HswFarm:
                     await self._recycle_page(slot, hsw_js, cache_key)
                     result = await slot.page.evaluate("(req) => hsw(req)", req_token)
                     if not result:
-                        raise RuntimeError("hsw() returned empty after recycle") from e
+                        raise RuntimeError("NET_CAPTCHA: solver empty") from e
 
                 slot.solves += 1
                 self.total_solves += 1
@@ -636,10 +652,7 @@ async def _camoufox_new_page(browser):
     except Exception as e:
         last_err = e
 
-    raise RuntimeError(
-        f"Camoufox new_page failed (playwright/camoufox viewport mismatch). "
-        f"Pin playwright<1.61 on the server. Last error: {last_err}"
-    )
+    raise RuntimeError("NET_RUNTIME: browser page start failed")
 
 
 async def _new_page_strip_ismobile(browser):
@@ -660,7 +673,7 @@ async def _new_page_strip_ismobile(browser):
             if conn:
                 break
     if conn is None:
-        raise RuntimeError("cannot access playwright connection to patch viewport")
+        raise RuntimeError("NET_RUNTIME: browser session unavailable")
 
     original = conn.send
 
@@ -716,7 +729,7 @@ def submit_captcha(
     try:
         result = resp.json()
     except Exception:
-        raise RuntimeError(f"getcaptcha non-json: {resp.text[:200]}")
+        raise RuntimeError("NET_CAPTCHA: bad response")
 
     if "generated_pass_UUID" in result:
         token = result["generated_pass_UUID"]
@@ -726,8 +739,8 @@ def submit_captcha(
         )
         return token
     if "tasklist" in result:
-        raise RuntimeError("image_challenge — proxy/IP needs visual captcha")
-    raise RuntimeError(f"getcaptcha failed: {json.dumps(result)[:200]}")
+        raise RuntimeError("NET_CHALLENGE: extra verification required")
+    raise RuntimeError("NET_CAPTCHA: verification failed")
 
 
 def extract_audio_from_stream(text: str) -> bytes:
@@ -814,23 +827,21 @@ async def call_tts(
             return audio
         if resp.content and len(resp.content) > 100 and not resp.text.lstrip().startswith("{"):
             return resp.content
-        raise RuntimeError("200 but no audio_base64")
+        raise RuntimeError("NET_HTTP: empty audio response")
 
-    body = (resp.text or "")[:500]
+    # Generic codes only — no provider body / region in exception text
     if resp.status_code == 401:
-        low = body.lower()
-        if "landing page" in low or "sign_in_required" in low or "limit of available" in low:
-            raise RuntimeError(
-                "TTS_LANDING_LIMIT: IP này đã hết lượt free landing page. "
-                "Cần đổi IP proxy và chờ trước khi gen tiếp. "
-                f"chi tiết={body[:180]}"
-            )
-        raise RuntimeError(
-            f"TTS HTTP 401 (token/IP bị từ chối — cần token mới hoặc đổi IP proxy): {body}"
-        )
+        body = (resp.text or "").lower()
+        if (
+            "landing page" in body
+            or "sign_in_required" in body
+            or "limit of available" in body
+        ):
+            raise RuntimeError("NET_LIMIT: connection quota exhausted, rotate required")
+        raise RuntimeError("NET_AUTH: connection rejected, rotate required")
     if resp.status_code == 429:
-        raise RuntimeError(f"TTS HTTP 429 (quá nhiều request — chậm lại): {body}")
-    raise RuntimeError(f"TTS HTTP {resp.status_code}: {body}")
+        raise RuntimeError("NET_THROTTLE: too many requests, slow down")
+    raise RuntimeError(f"NET_HTTP: request failed ({resp.status_code})")
 
 
 async def solve_token(proxy_http: str | None) -> str:
@@ -1060,22 +1071,20 @@ class TokenPool:
             return rec.token, rec.proxy
 
         if self._paused:
-            raise RuntimeError("token-pool đang pause (đổi IP) — thử lại")
+            raise RuntimeError("NET_PAUSE: rotating connection, retry")
 
         # Starve: solve on-demand trên ĐÚNG self.proxy hiện tại
-        log("  [token-pool] starve → on-demand 1 token trên proxy pool")
+        log("  [token-pool] starve → on-demand 1")
         self._kick()
         async with self._lock:
             if self._paused:
-                raise RuntimeError("token-pool đang pause (đổi IP) — thử lại")
+                raise RuntimeError("NET_PAUSE: rotating connection, retry")
             px = self.proxy
             gen = self.gen
         token = await solve_token(px)
         # Nếu vừa rotate trong lúc solve → token có thể stale; caller retry
         if gen != self.gen or px != self.proxy or self._paused:
-            raise RuntimeError(
-                "token solved nhưng proxy đã rotate — thử lại (token⇄proxy)"
-            )
+            raise RuntimeError("NET_STALE: connection changed during mint, retry")
         return token, px
 
     async def _try_reserve(self) -> bool:
@@ -1269,7 +1278,7 @@ def proxyxoay_net_from_status(key: str) -> str:
     r = httpx.get(PROXYXOAY_NET_STATUS.format(key=key), timeout=20.0)
     data = r.json()
     if data.get("status") != 200:
-        raise RuntimeError(f"key-status fail: {data}")
+        raise RuntimeError("NET_PROXY: status fail")
     d = data["data"]
     auth = d.get("authentication") or ""
     user = d.get("username") or (auth.split(":")[0] if ":" in auth else "")
@@ -1278,15 +1287,12 @@ def proxyxoay_net_from_status(key: str) -> str:
     host = conn.get("ip")
     port = conn.get("http_ipv4")
     if not host or not port or str(port) in ("-1", "0", ""):
-        raise RuntimeError(f"no http_ipv4 in status: {conn}")
+        raise RuntimeError("NET_PROXY: no exit endpoint")
     if user and password:
         url = f"http://{user}:{password}@{host}:{port}"
     else:
         url = f"http://{host}:{port}"
-    log(
-        f"  [proxyxoay.net] {d.get('package_name')} | {host}:{port} "
-        f"exp={d.get('expired_at')} status={d.get('status_str')}"
-    )
+    log(f"  [net] exit ready")
     return url
 
 
@@ -1294,23 +1300,21 @@ def proxyxoay_net_change_ip(key: str) -> None:
     """Rotate exit IP (package may limit interval, e.g. 1–4 minutes)."""
     r = httpx.get(PROXYXOAY_NET_CHANGE_IP.format(key=key), timeout=30.0)
     data = r.json()
-    log(f"  [proxyxoay.net] change-ip → {data.get('message') or data}")
+    log(f"  [net] rotate request")
     if data.get("status") != 200:
         wait_s = parse_proxy_cooldown(data, default=60.0)
-        raise RuntimeError(
-            f"change-ip fail: {data.get('message') or data} | wait_s={wait_s:.1f}"
-        )
+        raise RuntimeError(f"NET_PROXY: rotate cooldown wait_s={wait_s:.1f}")
     time.sleep(3)  # docs: đợi vài giây
 
 
 def parse_proxyhttp(raw: str) -> str:
     """
-    Parse proxyxoay.shop proxyhttp field → http:// URL.
+    Parse proxyhttp field → http:// URL.
     Forms: host:port | host:port:: | host:port:user:pass
     """
     s = (raw or "").strip()
     if not s:
-        raise RuntimeError("empty proxyhttp")
+        raise RuntimeError("NET_PROXY: empty endpoint")
     if "://" in s:
         return normalize_proxy(s) or s
     # strip trailing empty segments from "ip:port::"
@@ -1318,10 +1322,10 @@ def parse_proxyhttp(raw: str) -> str:
         s = s[:-1]
     parts = s.split(":")
     if len(parts) < 2:
-        raise RuntimeError(f"bad proxyhttp: {raw!r}")
+        raise RuntimeError("NET_PROXY: bad endpoint")
     host, port = parts[0], parts[1]
     if not host or not port:
-        raise RuntimeError(f"bad proxyhttp host/port: {raw!r}")
+        raise RuntimeError("NET_PROXY: bad endpoint")
     if len(parts) >= 4:
         user = parts[2]
         password = ":".join(parts[3:])
@@ -1468,7 +1472,7 @@ def proxyxoay_shop_get(
     """
     key = (key or "").strip()
     if not key:
-        raise RuntimeError("proxyxoay.shop key empty")
+        raise RuntimeError("NET_PROXY: key empty")
     params = {
         "key": key,
         "nhamang": (nhamang or "random").strip() or "random",
@@ -1483,15 +1487,12 @@ def proxyxoay_shop_get(
     try:
         data = r.json()
     except Exception:
-        raise RuntimeError(f"proxyxoay.shop non-json: {r.text[:200]}") from None
+        raise RuntimeError("NET_PROXY: bad response") from None
     st = data.get("status")
     if st != 100:
         # Gắn wait_s vào exception để pipeline nghỉ đúng chu kỳ xoay
         wait_s = parse_proxy_cooldown(data, default=60.0)
-        msg = data.get("message") or data.get("msg") or data
-        raise RuntimeError(
-            f"proxyxoay.shop status={st}: {msg} | wait_s={wait_s:.1f}"
-        )
+        raise RuntimeError(f"NET_PROXY: rotate cooldown wait_s={wait_s:.1f}")
     return data
 
 
@@ -1611,9 +1612,7 @@ def rotate_proxy_line(line: dict) -> str:
         url = proxyxoay_net_from_status(key)
         line["url"] = url
         return url
-    raise RuntimeError(
-        f"không xoay được proxy provider={provider} (cần api_key shop/net)"
-    )
+    raise RuntimeError("NET_PROXY: cannot rotate connection")
 
 
 def fetch_proxyxoay(key: str | None = None, change_ip: bool = False) -> str:
@@ -1631,7 +1630,7 @@ def fetch_proxyxoay(key: str | None = None, change_ip: bool = False) -> str:
             if u and p:
                 return f"http://{u}:{p}@{cfg['host']}:{cfg['http_port']}"
             return f"http://{cfg['host']}:{cfg['http_port']}"
-        raise RuntimeError("proxyxoay key empty (set .proxyxoay.json or PROXYXOAY_KEY)")
+        raise RuntimeError("NET_PROXY: key empty")
 
     # proxyxoay.net rotating (primary)
     try:
@@ -1658,7 +1657,7 @@ def fetch_proxyxoay(key: str | None = None, change_ip: bool = False) -> str:
         if u and p:
             return f"http://{u}:{p}@{cfg['host']}:{cfg['http_port']}"
         return f"http://{cfg['host']}:{cfg['http_port']}"
-    raise RuntimeError("cannot resolve proxyxoay proxy URL")
+    raise RuntimeError("NET_PROXY: cannot resolve connection")
 
 
 def load_proxy_candidates() -> list[str]:

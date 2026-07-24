@@ -4,7 +4,7 @@ Tab Hội thoại (multi-voice) — UI tối giản:
 
   1) Bảng gán giọng: Tên nhân vật → voice đã lưu
   2) Ô script: mỗi dòng «Tên: nội dung»
-  3) Bắt đầu → từng lượt TTS anonymous → merge 1 file MP3
+  3) Bắt đầu → từng lượt TTS → merge 1 file MP3
 """
 from __future__ import annotations
 
@@ -175,7 +175,7 @@ class MultivoiceWorker(QThread):
             n_workers = max(1, min(5, int(self.workers or 1)))
             hsw = self.hsw_workers or min(8, max(3, n_workers * 2))
             self.log.emit(
-                f"Song song {n_workers} luồng TTS · {n_proxy} proxy · "
+                f"Song song {n_workers} luồng · {n_proxy} kênh · "
                 f"{total} lượt · retry/lượt ≤{self.max_attempts} · "
                 f"vòng song song ≤{self.OUTER_ROUNDS} · "
                 f"cứu hộ tuần tự ≤{self.RESCUE_ROUNDS}"
@@ -209,6 +209,12 @@ class MultivoiceWorker(QThread):
                 def on_status(row: int, status: str):
                     if self._stop:
                         return
+                    try:
+                        from user_safe import sanitize_status
+
+                        status = sanitize_status(status)
+                    except Exception:
+                        pass
                     path = ""
                     for j in flat:
                         if j["row"] == row:
@@ -236,9 +242,15 @@ class MultivoiceWorker(QThread):
                     else:
                         # Chưa final — outer/rescue còn retry
                         self.turn_status.emit(row, "Chờ thử lại…", path or "")
-                        self.log.emit(
-                            f"⚠ Lượt {row+1} tạm fail: {(err or '')[:140]}"
-                        )
+                        try:
+                            from user_safe import sanitize_user_error
+
+                            err_ui = sanitize_user_error(
+                                err, fallback="Đang thử lại…"
+                            )
+                        except Exception:
+                            err_ui = "Đang thử lại…"
+                        self.log.emit(f"⚠ Lượt {row+1}: {err_ui}")
                     self.progress.emit(count_done(), total)
 
                 async def pass_jobs(
@@ -279,7 +291,15 @@ class MultivoiceWorker(QThread):
                             on_done=on_done,
                         )
                     except Exception as e:
-                        self.log.emit(f"⚠ Pipeline {label}: {e}")
+                        try:
+                            from user_safe import sanitize_user_error
+
+                            self.log.emit(
+                                f"⚠ Pipeline {label}: "
+                                f"{sanitize_user_error(e, fallback='Đang thử lại…')}"
+                            )
+                        except Exception:
+                            self.log.emit(f"⚠ Pipeline {label}: đang thử lại…")
                         await asyncio.sleep(1.5)
 
                 # Skip lượt đã có sẵn
@@ -384,7 +404,14 @@ class MultivoiceWorker(QThread):
 
             asyncio.run(_run())
         except Exception as e:
-            self.failed.emit(f"{e}\n{traceback.format_exc()[:400]}")
+            try:
+                from user_safe import sanitize_user_error
+
+                self.failed.emit(
+                    sanitize_user_error(e, fallback="Lỗi tạo hội thoại. Thử lại sau.")
+                )
+            except Exception:
+                self.failed.emit("Lỗi tạo hội thoại. Thử lại sau.")
 
 
 class MultivoiceTab(QtWidgets.QWidget):
@@ -405,10 +432,70 @@ class MultivoiceTab(QtWidgets.QWidget):
         self._turns: List[dict] = []
         self._setup_ui()
         self._load_state()
+        self._apply_multivoice_gate()
+
+    def _multivoice_unlocked(self) -> bool:
+        u = self.user or {}
+        v = u.get("multivoice_enabled")
+        return v is True or v == 1 or str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    def _apply_multivoice_gate(self) -> None:
+        """Show premium cover when account lacks multivoice_enabled."""
+        stack = getattr(self, "_stack", None)
+        if stack is None:
+            return
+        if self._multivoice_unlocked():
+            stack.setCurrentWidget(self._page_main)
+        else:
+            stack.setCurrentWidget(self._page_gate)
+
+    def _build_premium_gate(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.addStretch(1)
+        card = QtWidgets.QFrame()
+        card.setObjectName("card")
+        card.setMaximumWidth(480)
+        cl = QtWidgets.QVBoxLayout(card)
+        cl.setContentsMargins(28, 28, 28, 28)
+        cl.setSpacing(12)
+        title = QtWidgets.QLabel("Hội thoại · Premium")
+        title.setObjectName("cardTitle")
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        cl.addWidget(title)
+        body = QtWidgets.QLabel(
+            "Tính năng hội thoại đa giọng dành cho tài khoản Premium.\n\n"
+            "Liên hệ sale / quản trị viên để kích hoạt tab này cho account của bạn."
+        )
+        body.setObjectName("muted")
+        body.setWordWrap(True)
+        body.setAlignment(QtCore.Qt.AlignCenter)
+        body.setStyleSheet("font-size: 13px; color: #525252; line-height: 1.4;")
+        cl.addWidget(body)
+        tip = QtWidgets.QLabel("Admin")
+        tip.setAlignment(QtCore.Qt.AlignCenter)
+        tip.setStyleSheet("font-size: 11px; color: #a3a3a3;")
+        cl.addWidget(tip)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(card)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addStretch(2)
+        return page
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _setup_ui(self):
-        root = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self._stack = QtWidgets.QStackedWidget()
+        outer.addWidget(self._stack)
+
+        self._page_main = QtWidgets.QWidget()
+        root = QtWidgets.QVBoxLayout(self._page_main)
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
         self.setStyleSheet(
@@ -737,6 +824,10 @@ class MultivoiceTab(QtWidgets.QWidget):
         self.tbl_files.cellDoubleClicked.connect(self._open_queue_file)
         self.tbl_turns.cellDoubleClicked.connect(self._open_turn_audio)
         self._script_timer.timeout.connect(lambda: self._preview_turns(silent=True))
+
+        self._page_gate = self._build_premium_gate()
+        self._stack.addWidget(self._page_main)
+        self._stack.addWidget(self._page_gate)
 
     # ── State ───────────────────────────────────────────────────────────
     def _voices_list(self) -> List[dict]:
@@ -1232,6 +1323,15 @@ class MultivoiceTab(QtWidgets.QWidget):
         if full:
             self.user = full
             self._refresh_account()
+            self._apply_multivoice_gate()
+        if not self._multivoice_unlocked():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Premium",
+                "Tab Hội thoại chưa được kích hoạt cho tài khoản này.\n"
+                "Liên hệ sale / quản trị viên.",
+            )
+            return
 
         jobs, errors = self._build_jobs()
         if errors:
@@ -1254,17 +1354,17 @@ class MultivoiceTab(QtWidgets.QWidget):
         if not proxy and not proxy_lines:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Thiếu proxy",
-                "Tài khoản chưa được gắn proxy.\n"
-                "Admin cấp proxy tại https://tts-origin.liveyt.pro/admin/",
+                "Thiếu kết nối",
+                "Tài khoản chưa được cấp đường truyền.\n"
+                "Liên hệ quản trị viên để kích hoạt.",
             )
             return
         if not proxy_lines:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Thiếu proxy",
-                "Không có proxy enabled trong pool.\n"
-                "Admin thêm proxy tại https://tts-origin.liveyt.pro/admin/",
+                "Thiếu kết nối",
+                "Không có đường truyền khả dụng cho tài khoản này.\n"
+                "Liên hệ quản trị viên.",
             )
             return
 
@@ -1462,7 +1562,13 @@ class MultivoiceTab(QtWidgets.QWidget):
     def _on_failed(self, err: str):
         self.bt_start.setEnabled(True)
         self.bt_stop.setEnabled(False)
-        self._set_status(f"Lỗi: {err[:200]}")
+        try:
+            from user_safe import sanitize_user_error
+
+            safe = sanitize_user_error(err, fallback="Lỗi tạo hội thoại. Thử lại sau.")
+        except Exception:
+            safe = "Lỗi tạo hội thoại. Thử lại sau."
+        self._set_status(f"Lỗi: {safe}")
         try:
             accounts.report_gen_stop(
                 self.user,
@@ -1474,7 +1580,7 @@ class MultivoiceTab(QtWidgets.QWidget):
             )
         except Exception:
             pass
-        QtWidgets.QMessageBox.critical(self, "Lỗi", err[:800])
+        QtWidgets.QMessageBox.critical(self, "Lỗi", safe)
 
     def _open_out(self):
         d = self.ed_out.text().strip()

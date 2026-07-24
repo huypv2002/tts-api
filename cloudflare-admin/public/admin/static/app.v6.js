@@ -479,6 +479,13 @@ async function renderAccounts(root) {
           <label>Enabled</label>
           <select id="a-enabled"><option value="1">Bật</option><option value="0">Tắt</option></select>
         </div>
+        <div class="field">
+          <label>Tab Hội thoại (premium)</label>
+          <select id="a-mv">
+            <option value="0">Tắt — hiện màn che</option>
+            <option value="1">Bật — dùng được</option>
+          </select>
+        </div>
       </div>
       <div class="form-actions" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
         <button class="primary" type="button" id="a-save">Tạo account</button>
@@ -494,7 +501,7 @@ async function renderAccounts(root) {
         <thead>
           <tr>
             <th>User</th><th>Role</th><th>Online</th><th>Gói</th><th>Used / Quota</th>
-            <th>Luồng</th><th>Max chars</th><th>Split</th><th>Proxies gắn</th><th></th>
+            <th>Luồng</th><th>Max chars</th><th>Split</th><th>Hội thoại</th><th>Proxies gắn</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -520,6 +527,10 @@ async function renderAccounts(root) {
                 String(a.split_mode || "line").toLowerCase() === "chars"
                   ? "chars"
                   : "line";
+              const mvOn =
+                a.multivoice_enabled === true ||
+                a.multivoice_enabled === 1 ||
+                a.multivoice_enabled === "1";
               return `
             <tr data-id="${esc(a.id)}" class="account-row" style="cursor:pointer" title="Click để sửa">
               <td><strong>${esc(a.username)}</strong></td>
@@ -534,6 +545,11 @@ async function renderAccounts(root) {
               <td>${a.max_workers ?? 2}</td>
               <td>${a.max_chars ?? 0}</td>
               <td><span class="badge ${splitLab === "chars" ? "user" : ""}">${esc(splitLab)}</span></td>
+              <td>${
+                mvOn
+                  ? `<span class="badge ok">ON</span>`
+                  : `<span class="muted" style="font-size:11px">OFF</span>`
+              }</td>
               <td data-stop-row="1">
                 ${proxyListHtml}
                 <button type="button" style="margin-top:4px;font-size:11px;padding:4px 8px" data-act="add-proxy" data-stop-row="1">+ Thêm proxy</button>
@@ -545,7 +561,7 @@ async function renderAccounts(root) {
               </td>
             </tr>`;
             })
-            .join("") || `<tr><td colspan="10" class="muted">Chưa có account</td></tr>`}
+            .join("") || `<tr><td colspan="11" class="muted">Chưa có account</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -566,6 +582,7 @@ async function renderAccounts(root) {
     $("#a-mw").value = "3";
     $("#a-mc").value = "0";
     if ($("#a-split")) $("#a-split").value = "line";
+    if ($("#a-mv")) $("#a-mv").value = "0";
     $("#a-px").value = "";
     $("#a-px").disabled = false;
     $("#a-enabled").value = "1";
@@ -592,6 +609,13 @@ async function renderAccounts(root) {
     if ($("#a-split"))
       $("#a-split").value =
         String(a.split_mode || "line").toLowerCase() === "chars" ? "chars" : "line";
+    if ($("#a-mv")) {
+      const mvOn =
+        a.multivoice_enabled === true ||
+        a.multivoice_enabled === 1 ||
+        a.multivoice_enabled === "1";
+      $("#a-mv").value = mvOn ? "1" : "0";
+    }
     $("#a-px").value = "";
     $("#a-px").disabled = true; // proxy gắn/gỡ ở cột bảng
     $("#a-enabled").value = a.enabled === false || a.enabled === 0 ? "0" : "1";
@@ -648,6 +672,7 @@ async function renderAccounts(root) {
           max_workers: mw,
           max_chars: mc,
           split_mode: ($("#a-split") && $("#a-split").value) || "line",
+          multivoice_enabled: ($("#a-mv") && $("#a-mv").value) === "1",
           proxy_id: $("#a-px").value,
         };
         if (!body.username || !body.password) {
@@ -684,6 +709,7 @@ async function renderAccounts(root) {
         max_workers: mw,
         max_chars: mc,
         split_mode: ($("#a-split") && $("#a-split").value) || "line",
+        multivoice_enabled: ($("#a-mv") && $("#a-mv").value) === "1",
         enabled: $("#a-enabled").value === "1",
       };
       const pw = $("#a-pass").value;

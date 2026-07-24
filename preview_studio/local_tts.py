@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-local_tts.py — Local preview TTS via fast_tts (HSW + anonymous).
+local_tts.py — Local TTS batch helpers.
 
 Kiến trúc đã sửa (gen 100%):
   _ProxyGate  — lưu proxy URL hiện tại, cập nhật ngay sau rotate,
@@ -44,7 +44,7 @@ from fast_tts import (  # noqa: E402
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_voice_info(voice_id: str) -> dict:
-    """Lấy metadata voice public từ ElevenLabs (không cần API key)."""
+    """Lấy metadata voice public (không cần API key)."""
     import json, urllib.error, urllib.request
 
     vid = (voice_id or "").strip()
@@ -171,6 +171,8 @@ _THROTTLE_MARKERS = (
     "timeout", "connect", "reset",
     "landing", "sign_in_required",
     "tts_landing_limit", "getcaptcha", "hsw",
+    "net_limit", "net_auth", "net_throttle", "net_captcha", "net_challenge", "net_http",
+    "net_proxy", "net_pause", "net_stale", "net_runtime",
 )
 
 _LANDING_MARKERS = (
@@ -178,6 +180,8 @@ _LANDING_MARKERS = (
     "landing page",
     "sign_in_required",
     "limit of available requests",
+    "net_limit",
+    "net_auth",
 )
 
 
@@ -259,7 +263,7 @@ class _ProxyGate:
             self._log(f"  [proxy] chờ {gap_left:.0f}s rotate cooldown…")
             await asyncio.sleep(gap_left)
 
-        self._log("  [proxy] đổi IP proxyxoay…")
+        self._log("  [net] rotate…")
         try:
             await asyncio.to_thread(proxyxoay_net_change_ip, self.proxy_api_key)
             self._last_rotate = time.time()
@@ -271,7 +275,7 @@ class _ProxyGate:
             new_url = await asyncio.to_thread(proxyxoay_net_from_status, self.proxy_api_key)
             async with self._proxy_lock:
                 self._current_proxy = new_url
-            self._log(f"  [proxy] IP mới sẵn sàng: {new_url.split('@')[-1] if '@' in new_url else new_url}")
+            self._log("  [net] rotate ok")
 
         except Exception as e:
             cool = _parse_cooldown(e, default=180.0 if landing else 90.0)
@@ -549,12 +553,17 @@ async def synthesize_batch_async(
                     on_done(row, True, job["out_path"], "")
 
             except Exception as e:
-                msg = str(e)[:280]
-                log(f"  [batch W{wid}] đoạn {row+1} lỗi lần {att}: {msg}")
+                try:
+                    from user_safe import sanitize_user_error
+
+                    msg = sanitize_user_error(e, fallback="Lỗi đoạn — đang thử lại…")
+                except Exception:
+                    msg = "Lỗi đoạn — đang thử lại…"
+                log(f"  [batch W{wid}] đoạn {row+1} lỗi lần {att}: {type(e).__name__}")
 
                 if _is_throttle(e):
                     if on_status:
-                        on_status(row, "Chờ proxy…")
+                        on_status(row, "Đang chờ kết nối…")
                     await gate.report_fail(e)   # rotate + pause bên trong
 
                 att_now = int(job.get("attempts") or 0)

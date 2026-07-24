@@ -79,6 +79,9 @@ $PY -m nuitka \
   --include-module=output_layout \
   --include-module=ffmpeg_tools \
   --include-module=multivoice \
+  --include-module=user_safe \
+  --include-module=version \
+  --include-module=auto_updater \
   --include-package=ui \
   --include-package=camoufox \
   --include-package=playwright \
@@ -150,48 +153,41 @@ if [[ -n "${BIN_PATH:-}" && -f "$BIN_PATH" ]]; then
   cp -f "$BIN_PATH" "$RELEASE_DIR/"
 fi
 cp -f "$SCRIPT_DIR/silent_1s.mp3" "$SCRIPT_DIR/silent_1_5s.mp3" "$SCRIPT_DIR/silent_05s.mp3" "$RELEASE_DIR/" 2>/dev/null || true
-cp -f "$ROOT/proxyxoay.example.json" "$RELEASE_DIR/" 2>/dev/null || true
-cp -f "$SCRIPT_DIR/requirements.txt" "$RELEASE_DIR/"
-cp -f "$SCRIPT_DIR/BUILD_NUITKA.md" "$RELEASE_DIR/" 2>/dev/null || true
+# Do NOT ship requirements / BUILD docs / proxy examples (tech leak)
 
 # Portable runtime (best-effort local build)
-mkdir -p "$RELEASE_DIR/bin" "$RELEASE_DIR/camoufox-browser"
+mkdir -p "$RELEASE_DIR/bin" "$RELEASE_DIR/runtime"
 if command -v ffmpeg >/dev/null 2>&1; then
   cp -f "$(command -v ffmpeg)" "$RELEASE_DIR/bin/" 2>/dev/null || true
   command -v ffprobe >/dev/null 2>&1 && cp -f "$(command -v ffprobe)" "$RELEASE_DIR/bin/" 2>/dev/null || true
 fi
-# Copy local camoufox cache if present
-CAMOUFOX_DST="$RELEASE_DIR/camoufox-browser" $PY - <<'PY' || true
+# Copy browser runtime (neutral folder name)
+RUNTIME_DST="$RELEASE_DIR/runtime" $PY - <<'PY' || true
 import os, shutil
 from pathlib import Path
 try:
     from camoufox.pkgman import INSTALL_DIR
     src = Path(INSTALL_DIR)
-    dst = Path(os.environ.get("CAMOUFOX_DST") or "camoufox-browser")
+    dst = Path(os.environ.get("RUNTIME_DST") or "runtime")
     if src.is_dir() and any(src.iterdir()):
         if dst.exists():
             shutil.rmtree(dst)
         shutil.copytree(src, dst)
-        print("copied camoufox", src, "->", dst)
+        print("copied runtime", src, "->", dst)
     else:
-        print("no local camoufox cache; run: camoufox fetch")
+        print("no local runtime cache")
 except Exception as e:
-    print("camoufox copy skip:", e)
+    print("runtime copy skip:", e)
 PY
 
 cat > "$RELEASE_DIR/HUONG_DAN.txt" <<'EOF'
 TTS Studio — Portable
 =====================
+1) Giai nen CA THU MUC
+2) Chay "TTS Studio" / .exe
+3) Dang nhap bang tai khoan do quan tri vien cap
 
-Giải nén CẢ THƯ MỤC rồi double-click "TTS Studio" / .exe.
-
-Kèm theo (bản full):
-  - bin/ffmpeg
-  - camoufox-browser/  (trình duyệt giải captcha)
-
-Không cần cài Python / ffmpeg / camoufox riêng nếu đủ 2 folder trên.
-
-Đăng nhập account do admin cấp. MP3 xuất vào output/ cạnh app.
+Neu khong mo duoc: cai lai ban portable day du hoac lien he quan tri vien.
 EOF
 
 # Launcher bat (Windows users unzip on Windows)
@@ -205,7 +201,7 @@ if exist "TTS Studio.exe" (
 ) else if exist "TTS Preview Studio.exe" (
   start "" "TTS Preview Studio.exe"
 ) else (
-  echo Binary not found.
+  echo Khong tim thay ung dung. Lien he quan tri vien.
   pause
 )
 EOF

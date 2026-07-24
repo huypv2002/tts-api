@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Multi-voice dialogue (anonymous TTS custom):
+Multi-voice dialogue script parser:
 
   1) Map nhân vật → voice_id (UI table)
   2) Script dạng:
         Nam: [happy] Chào cậu!
         Nữ: [curious] Chào!
   3) Mỗi dòng = 1 turn → 1 call TTS (voice riêng) → merge MP3
-
-Không dùng /v1/text-to-dialogue (cần API key).
 """
 from __future__ import annotations
 

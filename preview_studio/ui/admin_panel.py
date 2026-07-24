@@ -31,7 +31,7 @@ class AdminPanel(QtWidgets.QWidget):
         # ── Accounts ──
         acc = QtWidgets.QWidget()
         al = QtWidgets.QVBoxLayout(acc)
-        self.tbl_acc = QtWidgets.QTableWidget(0, 8)
+        self.tbl_acc = QtWidgets.QTableWidget(0, 9)
         self.tbl_acc.setHorizontalHeaderLabels(
             [
                 "User",
@@ -41,6 +41,7 @@ class AdminPanel(QtWidgets.QWidget):
                 "Quota",
                 "Còn",
                 "Max luồng",
+                "Hội thoại",
                 "Proxy",
             ]
         )
@@ -68,6 +69,8 @@ class AdminPanel(QtWidgets.QWidget):
         self.ed_note.setPlaceholderText("ghi chú")
         self.chk_enabled = QtWidgets.QCheckBox("Enabled")
         self.chk_enabled.setChecked(True)
+        self.chk_multivoice = QtWidgets.QCheckBox("Tab Hội thoại (premium)")
+        self.chk_multivoice.setChecked(False)
         form.addWidget(QtWidgets.QLabel("User"), 0, 0)
         form.addWidget(self.ed_user, 0, 1)
         form.addWidget(QtWidgets.QLabel("Pass"), 0, 2)
@@ -80,8 +83,9 @@ class AdminPanel(QtWidgets.QWidget):
         form.addWidget(self.sb_workers, 2, 1)
         form.addWidget(QtWidgets.QLabel("Proxy"), 2, 2)
         form.addWidget(self.cb_proxy, 2, 3)
-        form.addWidget(self.ed_note, 3, 0, 1, 3)
-        form.addWidget(self.chk_enabled, 3, 3)
+        form.addWidget(self.ed_note, 3, 0, 1, 2)
+        form.addWidget(self.chk_enabled, 3, 2)
+        form.addWidget(self.chk_multivoice, 3, 3)
         al.addLayout(form)
 
         brow = QtWidgets.QHBoxLayout()
@@ -118,14 +122,14 @@ class AdminPanel(QtWidgets.QWidget):
         self.ed_px_label = QtWidgets.QLineEdit()
         self.ed_px_label.setPlaceholderText("label")
         self.ed_px_key = QtWidgets.QLineEdit()
-        self.ed_px_key.setPlaceholderText("proxyxoay api_key")
+        self.ed_px_key.setPlaceholderText("API key đường truyền")
         self.ed_px_user = QtWidgets.QLineEdit()
         self.ed_px_user.setPlaceholderText("username")
         self.ed_px_pass = QtWidgets.QLineEdit()
         self.ed_px_pass.setPlaceholderText("password")
         self.ed_px_pass.setEchoMode(QtWidgets.QLineEdit.Password)
         self.ed_px_host = QtWidgets.QLineEdit()
-        self.ed_px_host.setPlaceholderText("host")
+        self.ed_px_host.setPlaceholderText("máy chủ")
         self.sb_px_port = QtWidgets.QSpinBox()
         self.sb_px_port.setRange(1, 65535)
         self.sb_px_port.setValue(8978)
@@ -268,6 +272,7 @@ class AdminPanel(QtWidgets.QWidget):
                 f"{int(r.get('char_quota') or 0):,}",
                 f"{int(r.get('chars_left') or 0):,}",
                 str(r.get("max_workers")),
+                "ON" if r.get("multivoice_enabled") else "OFF",
                 "yes" if r.get("has_proxy") else "no",
             ]
             for c, v in enumerate(vals):
@@ -319,6 +324,7 @@ class AdminPanel(QtWidgets.QWidget):
         self.sb_workers.setValue(int(a.get("max_workers") or 2))
         self.ed_note.setText(a.get("note") or "")
         self.chk_enabled.setChecked(bool(a.get("enabled", True)))
+        self.chk_multivoice.setChecked(bool(a.get("multivoice_enabled")))
         # package
         pid = a.get("package_id") or ""
         idx = self.cb_pkg.findData(pid)
@@ -365,7 +371,7 @@ class AdminPanel(QtWidgets.QWidget):
                         pkg_name = p.get("name") or ""
                         quota = int(p.get("chars") or quota)
                         break
-            store.create_account(
+            row = store.create_account(
                 username=self.ed_user.text().strip(),
                 password=self.ed_pass.text() or "123456",
                 note=self.ed_note.text().strip(),
@@ -376,12 +382,24 @@ class AdminPanel(QtWidgets.QWidget):
                 package_name=pkg_name,
                 proxy_id=self.cb_proxy.currentData() or "",
             )
+            if row and row.get("id"):
+                store.update_account(
+                    row["id"],
+                    multivoice_enabled=self.chk_multivoice.isChecked(),
+                )
             self.reload_all()
             if self.on_changed:
                 self.on_changed()
             QtWidgets.QMessageBox.information(self, "OK", "Đã tạo account")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Lỗi", str(e))
+            try:
+                from user_safe import sanitize_user_error
+
+                QtWidgets.QMessageBox.warning(
+                    self, "Lỗi", sanitize_user_error(e, fallback="Thao tác thất bại.")
+                )
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "Lỗi", "Thao tác thất bại.")
 
     def _acc_save(self):
         aid = self._selected_acc_id()
@@ -394,6 +412,7 @@ class AdminPanel(QtWidgets.QWidget):
             "enabled": self.chk_enabled.isChecked(),
             "max_workers": self.sb_workers.value(),
             "proxy_id": self.cb_proxy.currentData() or "",
+            "multivoice_enabled": self.chk_multivoice.isChecked(),
         }
         if self.ed_pass.text():
             fields["password"] = self.ed_pass.text()
@@ -452,7 +471,14 @@ class AdminPanel(QtWidgets.QWidget):
             self.reload_all()
             QtWidgets.QMessageBox.information(self, "OK", "Đã lưu proxy")
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Lỗi", str(e))
+            try:
+                from user_safe import sanitize_user_error
+
+                QtWidgets.QMessageBox.warning(
+                    self, "Lỗi", sanitize_user_error(e, fallback="Thao tác thất bại.")
+                )
+            except Exception:
+                QtWidgets.QMessageBox.warning(self, "Lỗi", "Thao tác thất bại.")
 
     def _px_del(self):
         r = self.tbl_px.currentRow()
